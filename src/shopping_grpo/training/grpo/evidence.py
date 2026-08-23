@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass
 
 EVIDENCE_VERSION = "shopping-evidence-v1"
@@ -43,6 +43,44 @@ class PublicStateSnapshot:
             )
         )
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def capture_public_snapshot(state: object) -> PublicStateSnapshot:
+    """Capture hashed navigation evidence from an observation-v2 public object."""
+    if not isinstance(state, Mapping):
+        state = {}
+    products = []
+    for product in state.get("products") or []:
+        if isinstance(product, Mapping) and product.get("asin") is not None:
+            products.append(product["asin"])
+    page_type = str(state.get("page_type") or "unknown")
+    searches = []
+    if page_type == "search_results":
+        searches.append(
+            (
+                state.get("normalized_query", state.get("query", "")),
+                state.get("page", 1),
+                tuple(products),
+            )
+        )
+    subpages = []
+    if page_type == "information_subpage":
+        subpages.append(
+            (
+                state.get("asin", state.get("product_id", "")),
+                state.get("subpage", state.get("section", "")),
+            )
+        )
+    raw_options = state.get("selected_options") or state.get("confirmed_options") or {}
+    if isinstance(raw_options, Mapping):
+        options = sorted(raw_options.items())
+    elif isinstance(raw_options, (list, tuple, set, frozenset)):
+        options = list(raw_options)
+    else:
+        options = [raw_options] if raw_options else []
+    return PublicStateSnapshot.from_public_state(
+        products, searches, page_type, subpages, options
+    )
 
 
 @dataclass(frozen=True)

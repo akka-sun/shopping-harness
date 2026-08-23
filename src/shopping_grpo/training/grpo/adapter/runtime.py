@@ -64,6 +64,13 @@ def make_runtime_state(task_id: int, max_steps: int) -> dict:
         "guard_rejection_reason_counts": {},
         "guard_rejection_after_truncation_count": 0,
         "action_attempt_after_truncation_count": 0,
+        "next_assistant_turn_id": 0,
+        "active_assistant_turn_id": None,
+        "evidence_events": [],
+        "assistant_turn_spans": [],
+        "credit_alignment_valid": True,
+        "credit_alignment_reason": None,
+        "_public_snapshot": None,
     }
 
 

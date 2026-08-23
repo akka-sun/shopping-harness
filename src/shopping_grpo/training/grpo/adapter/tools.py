@@ -10,6 +10,11 @@ from uuid import uuid4
 from shopping_grpo.environment.actions import action_reject_reason
 from shopping_grpo.environment.tools import tool_call_to_action
 from shopping_grpo.environment.observation import render_structured_observation
+from shopping_grpo.training.grpo.evidence import (
+    PublicStateSnapshot,
+    build_evidence_event,
+    capture_public_snapshot,
+)
 from shopping_grpo.training.grpo.adapter.runtime import (
     current_environment,
     current_runtime_state,
@@ -57,6 +62,8 @@ class ShopSimulatorTool(BaseTool):
             _terminate(state, "max_steps")
             return ToolResponse(text="Error: maximum executed tool steps reached."), 0.0, {"reason": "max_steps"}
         parameters = parameters if isinstance(parameters, dict) else {}
+        before = state.get("_public_snapshot") or capture_public_snapshot({})
+        turn_id = state.get("active_assistant_turn_id")
         # think 不触碰环境，只记录一次模型决策；其余工具必须经过动作守卫。
         if self.name == "think":
             step = _append_step(state, self.name, parameters)
@@ -65,7 +72,9 @@ class ShopSimulatorTool(BaseTool):
                 return ToolResponse(text="Error: maximum executed tool steps reached."), 0.0, step
             return ToolResponse(text="Reasoning recorded. Continue with one environment tool call."), 0.0, step
         observation = state.get("latest_observation", "")
+        repeats_before = state["repeat_action_count"]
         record_action_attempt(state, self.name, parameters, observation)
+        exact_repeat = state["repeat_action_count"] > repeats_before
         state["action_attempt_after_truncation_count"] += int(
             bool(state.get("latest_observation_truncated"))
         )
@@ -78,6 +87,10 @@ class ShopSimulatorTool(BaseTool):
                 bool(state.get("latest_observation_truncated"))
             )
             state["consecutive_guard_rejections"] += 1
+            _record_evidence(
+                state, turn_id, before, before, action_attempted=True,
+                guard_rejection=True, exact_repeat=exact_repeat,
+            )
             if state["consecutive_guard_rejections"] >= 3:
                 _terminate(state, "too_many_guard_rejections")
                 return ToolResponse(text="Error: maximum consecutive action guard rejections reached."), 0.0, {
@@ -90,10 +103,12 @@ class ShopSimulatorTool(BaseTool):
             action = tool_call_to_action(self.name, parameters)
             result = await asyncio.to_thread(env.step, action)
             if result.get("observation_state") is not None:
+                after = capture_public_snapshot(result["observation_state"])
                 observation = render_structured_observation(
                     result["observation_state"]
                 )
             else:
+                after = before
                 observation = str(
                     result.get("instruction", result.get("observation", ""))
                 )
@@ -112,6 +127,11 @@ class ShopSimulatorTool(BaseTool):
             )
             return ToolResponse(text=f"Error: ShopSimulator tool execution failed: {exc}"), 0.0, {"error": state["error"]}
         state["consecutive_guard_rejections"] = 0
+        _record_evidence(
+            state, turn_id, before, after, action_attempted=True,
+            exact_repeat=exact_repeat, terminal=bool(step["done"]),
+        )
+        state["_public_snapshot"] = after
         if step["done"]:
             state["done"] = True
             state["terminate"] = True
@@ -185,6 +205,21 @@ def _append_step(state, tool, parameters, done=False, reward=0.0):
     }
     state["steps"].append(step)
     return step
+
+
+def _record_evidence(
+    state, turn_id, before: PublicStateSnapshot, after: PublicStateSnapshot, **kwargs
+):
+    if turn_id is None:
+        state["credit_alignment_valid"] = False
+        state["credit_alignment_reason"] = "tool_without_assistant_turn"
+        return
+    event = build_evidence_event(turn_id, before, after, **kwargs).to_dict()
+    for index, current in enumerate(state["evidence_events"]):
+        if current.get("assistant_turn_id") == turn_id:
+            state["evidence_events"][index] = event
+            return
+    state["evidence_events"].append(event)
 
 
 def _mark_infrastructure_invalid(state, reason):
