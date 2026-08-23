@@ -2,25 +2,25 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
-import hashlib
 from collections.abc import Hashable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from shopping_grpo.training.grpo.curriculum.state import CurriculumState
+from shopping_grpo.training.grpo.curriculum.priority import PrioritySignals, compute_task_priority
 from shopping_grpo.training.grpo.curriculum.sampler import (
     CurriculumSampler,
     SamplerConfig,
     TaskCandidate,
 )
-from shopping_grpo.training.grpo.curriculum.priority import PrioritySignals, compute_task_priority
-from shopping_grpo.training.grpo.curriculum.state import GroupOutcome
-from shopping_grpo.training.grpo.failure_types import normalize_failure_type
+from shopping_grpo.training.grpo.curriculum.state import CurriculumState, GroupOutcome
 from shopping_grpo.training.grpo.evidence import validate_evidence_event
+from shopping_grpo.training.grpo.failure_types import normalize_failure_type
 from shopping_grpo.training.grpo.trajectory_credit import (
     CreditConfig,
+    CreditFallbackWindow,
     TurnSpan,
     project_token_advantages,
 )
@@ -68,7 +68,11 @@ def load_curriculum_sidecar(
     return CurriculumState.from_checkpoint(payload, manifest_hash, config_hash, total_steps)
 
 
-def apply_evidence_credit(batch, config: Mapping[str, object]) -> dict[str, object]:
+def apply_evidence_credit(
+    batch,
+    config: Mapping[str, object],
+    fallback_window: CreditFallbackWindow | None = None,
+) -> dict[str, object]:
     """Apply public turn credit only to the existing response-token advantages."""
     if not bool(config.get("enable", False)):
         return {"applied": 0, "fallback_count": 0, "fallback_reasons": {}}
@@ -95,6 +99,8 @@ def apply_evidence_credit(batch, config: Mapping[str, object]) -> dict[str, obje
         if not isinstance(info, Mapping):
             reason = "missing_shopping_metadata"
             fallback_reasons[reason] = fallback_reasons.get(reason, 0) + 1
+            if fallback_window is not None:
+                fallback_window.record(True)
             continue
         try:
             events = [validate_evidence_event(raw) for raw in info.get("evidence_events", [])]
@@ -115,13 +121,19 @@ def apply_evidence_credit(batch, config: Mapping[str, object]) -> dict[str, obje
         except (KeyError, TypeError, ValueError) as exc:
             reason = str(exc) or exc.__class__.__name__
             fallback_reasons[reason] = fallback_reasons.get(reason, 0) + 1
+            if fallback_window is not None:
+                fallback_window.record(True)
             continue
         if result.fallback_reason:
             fallback_reasons[result.fallback_reason] = fallback_reasons.get(result.fallback_reason, 0) + 1
+            if fallback_window is not None:
+                fallback_window.record(True)
             continue
         updated[index] = result.token_advantages.to(dtype=advantages.dtype, device=advantages.device)
         applied += 1
         mass_error = max(mass_error, float(result.mass_error))
+        if fallback_window is not None:
+            fallback_window.record(False)
     if applied:
         batch.batch["advantages"] = updated
     return {

@@ -10,10 +10,10 @@ from shopping_grpo.training.grpo.curriculum.state import CurriculumState
 from shopping_grpo.training.grpo.dynamic_sampling import (
     apply_evidence_credit,
     load_curriculum_sidecar,
-    save_curriculum_sidecar,
     sanitize_curriculum_diagnostic,
+    save_curriculum_sidecar,
 )
-
+from shopping_grpo.training.grpo.trajectory_credit import CreditFallbackWindow
 
 PATCH = Path(__file__).resolve().parents[1] / "patches/verl-0.8.0-shopping-dynamic-sampling.patch"
 
@@ -53,6 +53,14 @@ def test_zero_advantage_stays_zero():
     batch = _batch(0.0)
     apply_evidence_credit(batch, {"enable": True})
     assert torch.equal(batch.batch["advantages"], torch.zeros((1, 4)))
+
+
+def test_credit_fallback_window_aborts_only_after_full_window():
+    window = CreditFallbackWindow(size=3, threshold=.5)
+    window.record(True)
+    window.record(False)
+    with pytest.raises(RuntimeError, match="fallback rate"):
+        window.record(True)
 
 
 def test_curriculum_sidecar_roundtrip_and_required_missing(tmp_path):

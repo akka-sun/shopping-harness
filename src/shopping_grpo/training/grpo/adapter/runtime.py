@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-from contextvars import ContextVar
 import hashlib
 import json
 import math
 from collections.abc import Mapping
-
+from contextvars import ContextVar
 
 current_environment: ContextVar = ContextVar("shopsimulator_environment", default=None)
 current_runtime_state: ContextVar = ContextVar("shopsimulator_runtime_state", default=None)

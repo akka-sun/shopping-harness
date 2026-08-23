@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from collections import deque
 from dataclasses import dataclass
 from typing import Any
 
@@ -41,6 +42,25 @@ class ProjectionResult:
     multipliers: tuple[float, ...]
     mass_error: float
     fallback_reason: str | None = None
+
+
+class CreditFallbackWindow:
+    """Fail a run when a full rolling window exceeds the fallback threshold."""
+
+    def __init__(self, size: int, threshold: float):
+        if size <= 0 or not 0 <= threshold <= 1:
+            raise ValueError("fallback window size/threshold are invalid")
+        self.size = int(size)
+        self.threshold = float(threshold)
+        self._values = deque(maxlen=self.size)
+
+    def record(self, fallback: bool) -> None:
+        self._values.append(bool(fallback))
+        if len(self._values) == self.size and sum(self._values) / self.size > self.threshold:
+            raise RuntimeError(
+                f"trajectory credit fallback rate exceeds {self.threshold:.6f} "
+                f"over {self.size} trajectories"
+            )
 
 
 def _fallback(count: int, reason: str) -> CreditResult:

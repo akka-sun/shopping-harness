@@ -9,7 +9,7 @@
  import json
  import os
  import uuid
-@@ -1380,6 +1382,101 @@
+@@ -1380,6 +1382,108 @@
              config=OmegaConf.to_container(self.config, resolve=True),
          )
  
@@ -23,7 +23,10 @@
 +            select_reward_varying_groups,
 +        )
 +        from shopping_grpo.training.grpo.curriculum.sampler import CurriculumSampler
-+        from shopping_grpo.training.grpo.trajectory_credit import project_token_advantages
++        from shopping_grpo.training.grpo.trajectory_credit import (
++            CreditFallbackWindow,
++            project_token_advantages,
++        )
 +        # Checkpoint contract: CurriculumState.to_checkpoint / CurriculumState.from_checkpoint.
 +
 +        diagnostics_path = os.environ.get("SHOPPING_GRPO_DIAGNOSTICS_PATH")
@@ -33,6 +36,10 @@
 +        curriculum_config = self.config.get("shopping_curriculum_sampling", {})
 +        curriculum_enabled = bool(curriculum_config.get("enable", False))
 +        trajectory_credit_config = self.config.get("shopping_trajectory_credit", {})
++        credit_fallback_window = CreditFallbackWindow(
++            int(trajectory_credit_config.get("fallback_rate_window", 100)),
++            float(trajectory_credit_config.get("fallback_rate_threshold", 0.05)),
++        ) if bool(trajectory_credit_config.get("enable", False)) else None
 +        curriculum_runtime = None
 +        if curriculum_enabled:
 +            curriculum_runtime = EvidenceCurriculumRuntime(
@@ -111,7 +118,7 @@
          self.global_steps = 0
  
          # load checkpoint and update weights before doing anything
-@@ -1406,14 +1503,17 @@
+@@ -1406,14 +1510,17 @@
          # add tqdm
          progress_bar = tqdm(total=self.total_training_steps, initial=self.global_steps, desc="Training Progress")
  
@@ -132,7 +139,7 @@
              if self.config.global_profiler.steps is not None
              else False
          )
-@@ -1421,6 +1521,14 @@
+@@ -1421,6 +1528,14 @@
  
          for epoch in range(current_epoch, self.config.trainer.total_epochs):
              for batch_dict in self.train_dataloader:
@@ -147,7 +154,7 @@
                  if hasattr(self.actor_rollout_wg, "async_calls_finalize_fn_exec"):
                      self.actor_rollout_wg.async_calls_finalize_fn_exec(blocking=False)
                  metrics = {}
-@@ -1443,7 +1551,7 @@
+@@ -1443,7 +1558,7 @@
                  gen_batch = self._get_gen_batch(batch)
  
                  # pass global_steps to trace
@@ -156,7 +163,7 @@
                  rollout_n = self.config.actor_rollout_ref.rollout.n
                  gen_batch_output = gen_batch.repeat(repeat_times=rollout_n, interleave=True)
  
-@@ -1461,14 +1569,15 @@
+@@ -1461,14 +1576,15 @@
                      combined_gen_batch = gen_batch_output
                      num_sampled_prompts = len(gen_batch_output)
  
@@ -174,7 +181,7 @@
                          if curr_step_profile:
                              self.llm_server_manager.stop_profile()
  
-@@ -1524,6 +1633,341 @@
+@@ -1524,6 +1640,341 @@
                          # extract reward_tensor and reward_extra_infos_dict for training
                          reward_tensor, reward_extra_infos_dict = extract_reward(batch)
  
@@ -516,7 +523,7 @@
                      # Operating Mode Selection:
                      # - Bypass mode: Sets old_log_probs = rollout_log_probs (2 policies: π_rollout, π_θ)
                      # - Decoupled mode: Recomputes old_log_probs as proximal anchor (3 policies: π_rollout, π_old, π_θ)
-@@ -1631,6 +2075,17 @@
+@@ -1631,6 +2082,18 @@
                              norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
                              config=self.config.algorithm,
                          )
@@ -525,6 +532,7 @@
 +                        credit_diagnostic = apply_evidence_credit(
 +                            batch,
 +                            OmegaConf.to_container(trajectory_credit_config, resolve=True),
++                            credit_fallback_window,
 +                        )
 +                        metrics.update({
 +                            "shopping_credit/applied": credit_diagnostic["applied"],
@@ -534,7 +542,7 @@
  
                      # update critic
                      if self.use_critic:
-@@ -1640,13 +2095,16 @@
+@@ -1640,13 +2103,16 @@
                          metrics.update(critic_output_metrics)
  
                      # implement critic warmup
@@ -553,7 +561,7 @@
  
                          # Check if the ESI (Elastic Server Instance)/training plan is close to expiration.
                          esi_close_to_expiration = should_save_ckpt_esi(
-@@ -1662,17 +2120,25 @@
+@@ -1662,17 +2128,25 @@
                          # 4. The ESI(Elastic Server Instance)/training plan is close to expiration.
                          if self.config.trainer.save_freq > 0 and (
                              is_last_step
@@ -581,7 +589,7 @@
  
                          actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
                          metrics.update(actor_output_metrics)
-@@ -1684,7 +2150,7 @@
+@@ -1684,7 +2158,7 @@
  
                  # validate
                  if self.config.trainer.test_freq > 0 and (
@@ -590,7 +598,7 @@
                  ):
                      with marked_timer("testing", timing_raw, color="green"):
                          val_metrics: dict = self._validate()
-@@ -1694,7 +2160,7 @@
+@@ -1694,7 +2168,7 @@
  
                  with marked_timer("stop_profile", timing_raw):
                      next_step_profile = (
@@ -599,7 +607,7 @@
                          if self.config.global_profiler.steps is not None
                          else False
                      )
-@@ -1712,10 +2178,23 @@
+@@ -1712,10 +2186,23 @@
                  # training metrics
                  metrics.update(
                      {
@@ -624,7 +632,7 @@
                  # collect metrics
                  metrics.update(compute_data_metrics(batch=batch, use_critic=self.use_critic))
                  # GDPO per-component reward metrics
-@@ -1747,10 +2226,25 @@
+@@ -1747,10 +2234,25 @@
                  )
  
                  # TODO: make a canonical logger that supports various backend

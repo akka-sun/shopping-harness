@@ -385,6 +385,7 @@ bash scripts/grpo.sh --logger swanlab
 - [数据采集与数据来源](docs/data-collection.md)
 - [LoRA SFT](docs/sft.md)
 - [使用 veRL 进行 GRPO](docs/grpo.md)
+- [Fresh-SFT 难度 Probe 与单次 GRPO 证据课程](docs/grpo.md#fresh-sft-difficulty-probe-and-evidence-curriculum)
 - [留出集评估](docs/evaluation.md)
 - [Final-200 Clean 测试集说明](docs/evaluation-dataset.md)
 - [Final-200 Benchmark Dashboard（历史）](docs/evaluation-dashboard.html)

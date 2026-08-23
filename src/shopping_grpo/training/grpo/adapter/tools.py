@@ -8,18 +8,18 @@ from typing import Any
 from uuid import uuid4
 
 from shopping_grpo.environment.actions import action_reject_reason
-from shopping_grpo.environment.tools import tool_call_to_action
 from shopping_grpo.environment.observation import render_structured_observation
-from shopping_grpo.training.grpo.evidence import (
-    PublicStateSnapshot,
-    build_evidence_event,
-    capture_public_snapshot,
-)
+from shopping_grpo.environment.tools import tool_call_to_action
 from shopping_grpo.training.grpo.adapter.runtime import (
     current_environment,
     current_runtime_state,
     record_action_attempt,
     validate_reward,
+)
+from shopping_grpo.training.grpo.evidence import (
+    PublicStateSnapshot,
+    build_evidence_event,
+    capture_public_snapshot,
 )
 
 try:  # 本地单测不安装 veRL；部署时由 veRL 注入真实类型。
