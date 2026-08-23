@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 import tempfile
@@ -9,7 +10,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from scripts.train_grpo import build_command, parse_args
+from scripts.train_grpo import build_command, main as grpo_main, parse_args
 from shopping_grpo.cli import main as cli_main
 from shopping_grpo.smoke import run_cpu_smoke
 
@@ -94,6 +95,51 @@ class PublicEntrypointTest(unittest.TestCase):
             str(output.resolve() / "training_diagnostics.jsonl"),
         )
         self.assertIn("trainer.logger=[console]", command)
+
+    def test_grpo_preflight_receives_normalized_hydra_overrides(self):
+        root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "output"
+            args = argparse.Namespace(
+                logger="console",
+                config=root / "configs/grpo.yaml",
+                dry_run=False,
+                experiment_name="regression",
+                hydra_overrides=["--", "trainer.total_epochs=2"],
+            )
+            command = [
+                sys.executable,
+                "-m",
+                "verl.trainer.main_ppo",
+                f"--config-path={root / 'configs'}",
+                "--config-name=grpo",
+                "trainer.logger=[console]",
+                "trainer.experiment_name=regression",
+                "trainer.total_epochs=2",
+            ]
+            environment = {
+                "GRPO_MODEL_PATH": "/model",
+                "GRPO_TRAIN_FILE": "/train.parquet",
+                "GRPO_VAL_FILE": "/validation.parquet",
+                "SHOPSIM_BASE_URL": "http://127.0.0.1:5700",
+                "GRPO_OUTPUT_DIR": str(output),
+            }
+            with patch("scripts.train_grpo.parse_args", return_value=args), patch(
+                "scripts.train_grpo.build_command",
+                return_value=(command, environment),
+            ), patch("scripts.train_grpo.subprocess.call", side_effect=[0, 0]) as call:
+                with self.assertRaisesRegex(SystemExit, "0"):
+                    grpo_main()
+
+        preflight = call.call_args_list[0].args[0]
+        self.assertEqual(
+            preflight[2:],
+            [
+                "trainer.logger=[console]",
+                "trainer.experiment_name=regression",
+                "trainer.total_epochs=2",
+            ],
+        )
 
 
 if __name__ == "__main__":

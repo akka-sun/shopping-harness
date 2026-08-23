@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import tempfile
 
+from scripts.check_grpo_runtime import validate_reward_runtime_files
 from shopping_grpo.environment.manifest import (
     MANIFEST_VERSION,
     shopsimulator_source_commit,
@@ -11,6 +12,14 @@ from shopping_grpo.environment.manifest import (
 
 
 class EnvironmentManifestTest(unittest.TestCase):
+    def test_frozen_manifest_matches_embedded_runtime_files(self):
+        root = Path(__file__).resolve().parents[1]
+        manifest = json.loads(
+            (root / "data/environment.json").read_text(encoding="utf-8")
+        )
+
+        validate_reward_runtime_files(manifest, root)
+
     def test_current_environment_contract_is_validated(self):
         manifest = {
             "manifest_version": MANIFEST_VERSION,

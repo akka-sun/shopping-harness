@@ -349,10 +349,10 @@ def validate_training_memory_budget(config):
         ("actor.ppo_max_token_len_per_gpu", int(actor.ppo_max_token_len_per_gpu)),
         ("ref.log_prob_max_token_len_per_gpu", int(reference.log_prob_max_token_len_per_gpu)),
     ):
-        if value != MAX_SAFE_SEQUENCE_LENGTH:
+        if value != total_length:
             raise SystemExit(
                 f"unsafe or inconsistent GRPO memory budget: {name} must equal "
-                f"{MAX_SAFE_SEQUENCE_LENGTH}, got {value}"
+                f"{total_length}, got {value}"
             )
     if bool(actor.use_dynamic_bsz):
         raise SystemExit(

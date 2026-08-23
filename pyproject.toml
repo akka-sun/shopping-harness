@@ -38,6 +38,7 @@ grpo = [
   "tensordict==0.10.0",
   "numpy==2.2.6",
   "swanlab==0.9.1",
+  "liger-kernel>=0.6,<1",
 ]
 dev = [
   "build>=1.2,<2",

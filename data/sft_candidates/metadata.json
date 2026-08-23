@@ -1,0 +1,45 @@
+{
+  "schema_version": "shopping-sft-task-pool-v1",
+  "environment": "shopsimulator-environment-v2.1",
+  "products_archive": {
+    "path": "/root/autodl-tmp/shopping-grpo-longhorizon/environments/ShopSimulator/shop_env/data/fine_items_eval_train_all.json.gz",
+    "sha256": "f51c33217061479f9c95a1068621fcd38e4883ae3d2f6a1627037bea934f2125"
+  },
+  "seed": 20260821,
+  "source_task_count": 23421,
+  "excluded_task_count": 2250,
+  "eligible_task_count": 21171,
+  "task_count": 10000,
+  "exclusions": [
+    {
+      "path": "/root/autodl-tmp/shopping-grpo-longhorizon/data/grpo/train.jsonl",
+      "task_count": 1000,
+      "sha256": "4e6d441e1a432223741b2968d1622d1e77ab855a7d8fe9275cd7df2bbf5565bf"
+    },
+    {
+      "path": "/root/autodl-tmp/shopping-grpo-longhorizon/data/grpo/validation.jsonl",
+      "task_count": 50,
+      "sha256": "11e0e15ec9fe6911c7c5b8e8525ad06a0b020367e58461e6ab1baa3cdbe73d61"
+    },
+    {
+      "path": "/root/autodl-tmp/shopping-grpo-longhorizon/data/evaluation/tasks.jsonl",
+      "task_count": 200,
+      "sha256": "d99112a20ef47534c27a32e4b38229bf048dcc6b06fef2e3e919aac3093662f5"
+    },
+    {
+      "path": "/root/autodl-tmp/shopping-grpo-longhorizon/data/sft/train.jsonl",
+      "task_count": 800,
+      "sha256": "8c3a6ff0033f6ea672af609891e747d60652ddc17e8d3c8eacb19e9d96dd9477"
+    },
+    {
+      "path": "/root/autodl-tmp/shopping-grpo-longhorizon/data/sft/validation.jsonl",
+      "task_count": 200,
+      "sha256": "9525cc2fb04a1d8d38ae2db959397da908dde3fea766f580fdcf77d1239533cc"
+    }
+  ],
+  "tasks": {
+    "path": "/root/autodl-tmp/shopping-grpo-longhorizon/data/sft_candidates/tasks.jsonl",
+    "rows": 10000,
+    "sha256": "59a3f08dfd13ca302f9c0975f4046174e7bf0429821dd2123073f84aab12f94e"
+  }
+}

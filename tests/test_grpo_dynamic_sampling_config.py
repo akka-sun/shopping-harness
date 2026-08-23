@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 
@@ -15,13 +16,53 @@ from scripts.check_grpo_runtime import (
 
 
 class DynamicSamplingConfigTest(unittest.TestCase):
+    def test_grpo_extra_installs_liger_kernel(self):
+        root = Path(__file__).resolve().parents[1]
+        project = tomllib.loads(
+            (root / "pyproject.toml").read_text(encoding="utf-8")
+        )
+
+        self.assertIn(
+            "liger-kernel>=0.6,<1",
+            project["project"]["optional-dependencies"]["grpo"],
+        )
+
+    def test_grpo_model_uses_liger_kernel(self):
+        config = compose_runtime_config([])
+
+        self.assertTrue(config.actor_rollout_ref.model.use_liger)
+
+    def test_rollout_reserves_thirty_five_percent_of_gpu_memory(self):
+        config = compose_runtime_config([])
+
+        self.assertEqual(
+            config.actor_rollout_ref.rollout.gpu_memory_utilization,
+            0.35,
+        )
+
     def test_training_memory_budget_enforces_real_micro_batch_one(self):
         config = compose_runtime_config([])
         validate_training_memory_budget(config)
         self.assertEqual(config.data.max_response_length, 20480)
+        self.assertEqual(
+            config.actor_rollout_ref.actor.ppo_max_token_len_per_gpu,
+            24576,
+        )
         self.assertEqual(config.actor_rollout_ref.rollout.max_model_len, 24576)
+        self.assertEqual(
+            config.actor_rollout_ref.rollout.max_num_batched_tokens,
+            24576,
+        )
+        self.assertEqual(
+            config.actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu,
+            24576,
+        )
+        self.assertEqual(
+            config.actor_rollout_ref.ref.log_prob_max_token_len_per_gpu,
+            24576,
+        )
         self.assertFalse(config.actor_rollout_ref.actor.use_dynamic_bsz)
-        self.assertTrue(config.actor_rollout_ref.actor.calculate_entropy)
+        self.assertFalse(config.actor_rollout_ref.actor.calculate_entropy)
         self.assertEqual(
             config.actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu, 1
         )
@@ -40,6 +81,12 @@ class DynamicSamplingConfigTest(unittest.TestCase):
         unsafe_response = compose_runtime_config(["data.max_response_length=24576"])
         with self.assertRaisesRegex(SystemExit, "unsafe GRPO response budget"):
             validate_training_memory_budget(unsafe_response)
+
+        mismatched_rollout = compose_runtime_config(
+            ["actor_rollout_ref.rollout.max_model_len=20480"]
+        )
+        with self.assertRaisesRegex(SystemExit, "must equal 24576"):
+            validate_training_memory_budget(mismatched_rollout)
 
         dynamic_actor = compose_runtime_config(
             ["actor_rollout_ref.actor.use_dynamic_bsz=true"]
