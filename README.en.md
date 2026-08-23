@@ -373,6 +373,7 @@ bash scripts/grpo.sh --logger swanlab
 - [Data collection and dataset provenance](docs/data-collection.md)
 - [LoRA SFT](docs/sft.md)
 - [GRPO with veRL](docs/grpo.md)
+- [Fresh-SFT difficulty Probe and single-run evidence curriculum](docs/grpo.md#fresh-sft-difficulty-probe-and-evidence-curriculum)
 - [Held-out evaluation](docs/evaluation.md)
 - [Final-200 Clean evaluation dataset](docs/evaluation-dataset.md)
 - [Final-200 Benchmark Dashboard (historical)](docs/evaluation-dashboard.html)

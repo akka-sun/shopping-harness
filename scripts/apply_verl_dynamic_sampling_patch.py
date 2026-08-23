@@ -15,9 +15,9 @@ from pathlib import Path
 
 EXPECTED_VERL_VERSION = "0.8.0"
 EXPECTED_ORIGINAL_SHA256 = "de58d295cf86656a28196b0718168d4a11666f3e30957b7e166914496c2a6d66"
-EXPECTED_PATCHED_SHA256 = "684b491e20ba9d41e91d5010186d4d08b01a01fc67f8a77d17c086b0381e00a3"
-SUPERSEDED_PATCHED_SHA256 = "fc3564cc5680a9fa92ca7b0a9bc3ae87ccdc90c498ab1bfe34c6796d6c54fb5a"
-PATCH_MARKER = "SHOPPING_GRPO_DYNAMIC_SAMPLING_PATCH_V3"
+EXPECTED_PATCHED_SHA256 = "d44ffa7ccae165c362e4accd3b85dec7c1aa50924d087f0594bcf143f7606516"
+SUPERSEDED_PATCHED_SHA256 = "684b491e20ba9d41e91d5010186d4d08b01a01fc67f8a77d17c086b0381e00a3"
+PATCH_MARKER = "SHOPPING_GRPO_EVIDENCE_CURRICULUM_PATCH_V1"
 BACKUP_SUFFIX = ".shopping-grpo-dynamic-sampling.orig"
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 PATCH_FILE = PROJECT_ROOT / "patches/verl-0.8.0-shopping-dynamic-sampling.patch"
@@ -41,7 +41,7 @@ def resolve_installed_ray_trainer() -> Path:
     import verl
 
     verl_source = Path(verl.__file__).resolve()
-    expected_environment = (PROJECT_ROOT / ".venv").resolve()
+    expected_environment = Path(sys.executable).absolute().parent.parent
     if not verl_source.is_relative_to(expected_environment):
         raise RuntimeError(f"verl.__file__ is not from the project environment: {verl_source}")
 

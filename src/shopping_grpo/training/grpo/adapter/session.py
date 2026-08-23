@@ -10,7 +10,12 @@ import asyncio
 
 from shopping_grpo.environment.client import ShopAgentEnv
 from shopping_grpo.environment.observation import render_structured_observation
-from shopping_grpo.training.grpo.adapter.runtime import current_environment, current_runtime_state, make_runtime_state
+from shopping_grpo.training.grpo.adapter.runtime import (
+    current_environment,
+    current_runtime_state,
+    make_runtime_state,
+)
+from shopping_grpo.training.grpo.evidence import capture_public_snapshot
 
 
 class ShopSimulatorSession:
@@ -66,6 +71,9 @@ class ShopSimulatorSession:
                 f"expected {self.required_environment_version!r}, got {actual_version!r}"
             )
         if isinstance(initial, dict) and initial.get("observation_state") is not None:
+            self.state["_public_snapshot"] = capture_public_snapshot(
+                initial["observation_state"]
+            )
             self.state["latest_observation"] = render_structured_observation(
                 initial["observation_state"]
             )

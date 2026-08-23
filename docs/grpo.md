@@ -84,6 +84,54 @@ bash scripts/grpo.sh -- \
   trainer.save_freq=10
 ```
 
+## Fresh-SFT difficulty Probe and evidence curriculum
+
+The optional single-run curriculum keeps ordinary GRPO behavior for the first
+30% of committed optimizer steps, then samples unique train tasks using the
+frozen Probe difficulty plus online failure/learnability statistics. Generate
+and inspect the Probe command first:
+
+```bash
+python scripts/probe_grpo_difficulty.py --dry-run \
+  --model outputs/models/sft-merged \
+  --output outputs/probes/fresh-sft-v1
+```
+
+Execute the deterministic Probe (temperature 0, top-p 1, no sampling):
+
+```bash
+python scripts/probe_grpo_difficulty.py \
+  --model outputs/models/sft-merged \
+  --output outputs/probes/fresh-sft-v1
+```
+
+It writes `difficulty_manifest.jsonl`, `probe_metadata.json`, and
+`invalid_probes.jsonl`. Metadata records scorer/input hashes; invalid tasks are
+isolated and cannot enter training. Difficulty is 45% public task-rule score,
+30% action steps, 15% repeated-action ratio, and 10% Guard count.
+
+Inspect the curriculum launch without starting Ray, environments, or training:
+
+```bash
+python scripts/train_grpo_evidence_curriculum.py --dry-run \
+  --difficulty-manifest outputs/probes/fresh-sft-v1/difficulty_manifest.jsonl
+```
+
+Running the same command without `--dry-run` starts training and must only be
+done when execution has been explicitly requested. The independent switches
+`shopping_curriculum_sampling.enable` and `shopping_trajectory_credit.enable`
+support sampler-only and credit-only ablations; both are off in the canonical
+baseline configuration.
+
+Every checkpoint stores `shopping_curriculum_state.json` beside veRL state,
+after a committed optimizer update. Resume rejects a missing sidecar or a
+schema, manifest-hash, config-hash, total-step, or committed-step mismatch.
+Credit alignment failures fall back to ordinary GRPO multipliers of 1;
+compaction is explicitly unsupported for alignment. Aggregate diagnostics
+report phase, sampling mixture, failure proportions, fallbacks, multiplier
+summary and mass error without raw observations, action parameters, ASINs, or
+gold fields. The configured fallback window aborts a persistently invalid run.
+
 ## Export
 
 veRL checkpoints are not directly served by the evaluation launcher. Export the

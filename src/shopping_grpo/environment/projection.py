@@ -183,6 +183,7 @@ def _project_search_results(
             observation,
             count_tokens=count_tokens,
             token_budget=token_budget,
+            search_top_k=search_top_k,
         )
     body, footer = _split_footer(observation)
     segments = [segment.strip() for segment in body.split("[SEP]")]
@@ -265,6 +266,7 @@ def _project_structured_search_results(
     *,
     count_tokens,
     token_budget,
+    search_top_k,
 ):
     body, footer = _split_footer(observation)
     lines = body.splitlines()
@@ -279,6 +281,11 @@ def _project_structured_search_results(
     if not product_lines:
         raise ObservationProjectionError(
             "structured search observation has no product rows"
+        )
+    if len(product_lines) > search_top_k:
+        raise ObservationProjectionError(
+            f"raw search page has {len(product_lines)} products, above configured "
+            f"page capacity {search_top_k}"
         )
     raw_buttons = clickable_buttons(observation)
     product_asins = {asin for _, asin, _ in product_lines}

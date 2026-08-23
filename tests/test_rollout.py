@@ -20,6 +20,18 @@ from shopping_grpo.evaluation.rollout import (
 )
 
 
+def search_results_observation():
+    return (
+        "[SHOPPING_OBSERVATION_V2]\n"
+        "page_type: search_results\n"
+        "Page 1 of 1 (Total results: 1; ranks 1-1)\n"
+        "格式: rank|asin|price|brand|category|key_attributes|title\n"
+        "1|100000000001|99.0|brand|category|attribute|乳胶枕\n"
+        "搜索功能是否可用: False\n"
+        '可点击的按钮: ["back to search", "100000000001"]'
+    )
+
+
 class FakeEnv:
     def __init__(self, **kwargs):
         self.actions = []
@@ -32,7 +44,7 @@ class FakeEnv:
         self.actions.append(action)
         if action == "search[乳胶枕]":
             return {
-                "instruction": "results [SEP] 100000000001 [SEP] 乳胶枕",
+                "instruction": search_results_observation(),
                 "reward": 0.0,
                 "done": False,
             }
@@ -84,7 +96,7 @@ class GuardRecoveryEnv(FakeEnv):
         self.actions.append(action)
         if action == "search[乳胶枕]":
             return {
-                "instruction": "results [SEP] 100000000001 [SEP] 乳胶枕",
+                "instruction": search_results_observation(),
                 "reward": 0.0,
                 "done": False,
             }
@@ -275,7 +287,7 @@ class RolloutTest(unittest.TestCase):
             def step(self, action):
                 self.actions.append(action)
                 if action == "search[乳胶枕]":
-                    return {"instruction": "results [SEP] 100000000001", "reward": 0.0, "done": False}
+                    return {"instruction": search_results_observation(), "reward": 0.0, "done": False}
                 if action == "click[100000000001]":
                     return {
                         "instruction": 'detail\n\n可点击的按钮: ["满天星", "Description", "Buy Now"]',
@@ -334,7 +346,7 @@ class RolloutTest(unittest.TestCase):
             def step(self, action):
                 self.actions.append(action)
                 if action == "search[乳胶枕]":
-                    return {"instruction": "results [SEP] 100000000001", "reward": 0.0, "done": False}
+                    return {"instruction": search_results_observation(), "reward": 0.0, "done": False}
                 if action == "click[100000000001]":
                     return {
                         "instruction": 'detail\n\n可点击的按钮: ["满天星", "Buy Now"]',

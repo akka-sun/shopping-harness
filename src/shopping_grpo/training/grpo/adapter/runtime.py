@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-from contextvars import ContextVar
 import hashlib
 import json
 import math
 from collections.abc import Mapping
-
+from contextvars import ContextVar
 
 current_environment: ContextVar = ContextVar("shopsimulator_environment", default=None)
 current_runtime_state: ContextVar = ContextVar("shopsimulator_runtime_state", default=None)
@@ -64,6 +63,13 @@ def make_runtime_state(task_id: int, max_steps: int) -> dict:
         "guard_rejection_reason_counts": {},
         "guard_rejection_after_truncation_count": 0,
         "action_attempt_after_truncation_count": 0,
+        "next_assistant_turn_id": 0,
+        "active_assistant_turn_id": None,
+        "evidence_events": [],
+        "assistant_turn_spans": [],
+        "credit_alignment_valid": True,
+        "credit_alignment_reason": None,
+        "_public_snapshot": None,
     }
 
 

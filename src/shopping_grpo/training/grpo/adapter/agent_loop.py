@@ -24,6 +24,7 @@ from shopping_grpo.training.grpo.adapter.runtime import (
     terminal_reward,
 )
 from shopping_grpo.training.grpo.adapter.session import ShopSimulatorSession
+from shopping_grpo.training.grpo.evidence import build_evidence_event, capture_public_snapshot
 
 
 class ShoppingToolAgentLoop(ToolAgentLoop):
@@ -177,11 +178,51 @@ class ShoppingToolAgentLoop(ToolAgentLoop):
                 int(bounded_sampling_params["max_tokens"]),
                 self.context_generation_reserve_tokens,
             )
-        return await super()._handle_generating_state(
+        response_start = len(agent_data.response_mask)
+        next_state = await super()._handle_generating_state(
             agent_data,
             bounded_sampling_params,
             ignore_termination=ignore_termination,
         )
+        response_end = len(agent_data.response_mask)
+        if runtime_state is not None and response_end > response_start:
+            turn_id = runtime_state["next_assistant_turn_id"]
+            runtime_state["next_assistant_turn_id"] += 1
+            runtime_state["active_assistant_turn_id"] = turn_id
+            runtime_state["assistant_turn_spans"].append(
+                {"assistant_turn_id": turn_id, "start": response_start, "end": response_end}
+            )
+            snapshot = runtime_state.get("_public_snapshot") or capture_public_snapshot({})
+            runtime_state["evidence_events"].append(
+                build_evidence_event(
+                    turn_id, snapshot, snapshot, action_attempted=False
+                ).to_dict()
+            )
+        return next_state
+
+    @staticmethod
+    def _finalize_credit_metadata(state, response_length):
+        spans = state["assistant_turn_spans"]
+        events = state["evidence_events"]
+        valid = bool(state.get("credit_alignment_valid", True))
+        reason = state.get("credit_alignment_reason")
+        if state["context_compactions"]:
+            valid = False
+            reason = "context_compaction_alignment_unsupported"
+        elif len(events) != len(spans):
+            valid = False
+            reason = "event_turn_count_mismatch"
+        elif any(
+            span["assistant_turn_id"] != event.get("assistant_turn_id")
+            or span["start"] < 0
+            or span["end"] <= span["start"]
+            or span["end"] > response_length
+            for span, event in zip(spans, events, strict=True)
+        ):
+            valid = False
+            reason = "invalid_turn_span"
+        state["credit_alignment_valid"] = valid
+        state["credit_alignment_reason"] = reason
 
     async def _call_tool(self, tool_call, tools_kwargs, agent_data):
         """把工具适配器拿到的原始 observation 压缩成模型真正可见的版本。"""
@@ -279,6 +320,7 @@ class ShoppingToolAgentLoop(ToolAgentLoop):
                 if self.reward_mode == "constraint_aware"
                 else terminal_reward(state, mode=self.reward_mode)
             )
+            self._finalize_credit_metadata(state, len(output.response_mask))
             output.extra_fields["shopping"] = {
                 "task_id": task_id,
                 "steps": len(state["steps"]),
@@ -328,6 +370,10 @@ class ShoppingToolAgentLoop(ToolAgentLoop):
                 "action_attempts_after_truncation": int(
                     state["action_attempt_after_truncation_count"]
                 ),
+                "evidence_events": list(state["evidence_events"]),
+                "assistant_turn_spans": list(state["assistant_turn_spans"]),
+                "credit_alignment_valid": bool(state["credit_alignment_valid"]),
+                "credit_alignment_reason": state["credit_alignment_reason"],
             }
             return output
         finally:
