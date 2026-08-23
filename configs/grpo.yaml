@@ -110,6 +110,34 @@ shopping_dynamic_sampling:
   max_consecutive_skipped_updates: 10
   reward_tolerance: 1.0e-8
 
+shopping_curriculum_sampling:
+  enable: false
+  switch_ratio: 0.30
+  uniform_ratio: 0.20
+  manifest_path: null
+  priority_min: 0.05
+  priority_max: 4.0
+  zero_variance_patience: 4
+  save_state: true
+  seed: 20260823
+  variance_scale: 0.05
+  staleness_steps: 25
+  sampler_fallback_patience: 3
+
+shopping_trajectory_credit:
+  enable: false
+  event_version: shopping-evidence-v1
+  positive_evidence_score: 1.0
+  no_progress_score: -0.5
+  exact_repeat_score: -1.0
+  guard_rejection_score: -1.0
+  strength: 0.5
+  multiplier_min: 0.5
+  multiplier_max: 1.5
+  conservation_tolerance: 1.0e-6
+  fallback_rate_threshold: 0.05
+  fallback_rate_window: 100
+
 reward_model:
   enable: false
 

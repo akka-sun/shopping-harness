@@ -10,7 +10,6 @@ import sys
 from importlib.metadata import PackageNotFoundError, distribution, version
 from pathlib import Path
 
-
 EXPECTED_VERSIONS = {
     "verl": "0.8.0",
     "vllm": "0.25.1",
@@ -284,6 +283,33 @@ def validate_swanlab_tracking(config):
     )
 
 
+def validate_evidence_curriculum(config, manifest_path=None):
+    curriculum = config.get("shopping_curriculum_sampling", {})
+    credit = config.get("shopping_trajectory_credit", {})
+    if bool(curriculum.get("enable", False)):
+        switch_ratio = float(curriculum.get("switch_ratio", 0))
+        uniform_ratio = float(curriculum.get("uniform_ratio", 0))
+        if not 0 < switch_ratio < 1:
+            raise SystemExit("shopping_curriculum_sampling.switch_ratio must be in (0, 1)")
+        if not 0 < uniform_ratio <= 1:
+            raise SystemExit("shopping_curriculum_sampling.uniform_ratio must be in (0, 1]")
+        minimum = float(curriculum.get("priority_min", 0))
+        maximum = float(curriculum.get("priority_max", 0))
+        if not all(map(math.isfinite, (minimum, maximum))) or not 0 < minimum <= maximum:
+            raise SystemExit("curriculum priority bounds must be finite, positive, and ordered")
+        path = Path(manifest_path or curriculum.get("manifest_path") or "")
+        if not path.is_file():
+            raise SystemExit(f"difficulty manifest does not exist: {path}")
+    if bool(credit.get("enable", False)):
+        if credit.get("event_version") != "shopping-evidence-v1":
+            raise SystemExit("shopping_trajectory_credit.event_version is unsupported")
+        lower = float(credit.get("multiplier_min", 0))
+        upper = float(credit.get("multiplier_max", 0))
+        tolerance = float(credit.get("conservation_tolerance", -1))
+        if not 0 < lower <= 1 <= upper or tolerance < 0 or not math.isfinite(tolerance):
+            raise SystemExit("trajectory credit multiplier bounds/tolerance are invalid")
+
+
 def ppo_gradient_accumulation_steps(mini_batch_size: int, micro_batch_size: int) -> int:
     mini = int(mini_batch_size)
     micro = int(micro_batch_size)
@@ -407,13 +433,14 @@ def main():
     try:
         import torch
         import verl
-        from verl.experimental.agent_loop.tool_parser import ToolParser
         from verl.experimental.agent_loop.tool_agent_loop import AgentState, ToolAgentLoop
+        from verl.experimental.agent_loop.tool_parser import ToolParser
+        from verl.tools.base_tool import BaseTool
+        from verl.utils.tracking import Tracking
+
         from shopping_grpo.training.grpo.adapter.agent_loop import ShoppingToolAgentLoop
         from shopping_grpo.training.grpo.adapter.tools import ShopSimulatorTool
         from shopping_grpo.training.grpo.compat import install_torch_padding_fallback
-        from verl.tools.base_tool import BaseTool
-        from verl.utils.tracking import Tracking
     except ImportError as exc:
         raise SystemExit(
             "incompatible veRL 0.8 install: required AgentLoop/Tool APIs are unavailable; "
@@ -435,6 +462,10 @@ def main():
     if "swanlab" not in Tracking.supported_backend:
         raise SystemExit("veRL 0.8 SwanLab tracking backend is unavailable")
     validate_dynamic_sampling(config, verl_source, installed)
+    validate_evidence_curriculum(
+        config,
+        manifest_path=os.environ.get("SHOPPING_DIFFICULTY_MANIFEST"),
+    )
     validate_swanlab_tracking(config)
     install_torch_padding_fallback()
     print(
