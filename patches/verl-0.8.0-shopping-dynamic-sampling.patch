@@ -1,23 +1,53 @@
 --- a/verl/trainer/ppo/ray_trainer.py
 +++ b/verl/trainer/ppo/ray_trainer.py
-@@ -20,0 +21,2 @@
-+# SHOPPING_GRPO_DYNAMIC_SAMPLING_PATCH_V3
+@@ -18,6 +18,8 @@
+ This trainer supports model-agonistic model initialization with huggingface
+ """
+ 
++# SHOPPING_GRPO_EVIDENCE_CURRICULUM_PATCH_V1
 +
-@@ -1380,0 +1383,8 @@
-+        )
-+
+ import json
+ import os
+ import uuid
+@@ -1380,6 +1382,101 @@
+             config=OmegaConf.to_container(self.config, resolve=True),
+         )
+ 
 +        from shopping_grpo.training.grpo.dynamic_sampling import (
++            EvidenceCurriculumRuntime,
 +            aggregate_shopping_metrics,
++            apply_evidence_credit,
 +            append_training_diagnostic,
 +            build_rollout_diagnostics,
 +            extract_shopping_group_signals,
 +            select_reward_varying_groups,
-@@ -1381,0 +1392,64 @@
++        )
++        from shopping_grpo.training.grpo.curriculum.sampler import CurriculumSampler
++        from shopping_grpo.training.grpo.trajectory_credit import project_token_advantages
++        # Checkpoint contract: CurriculumState.to_checkpoint / CurriculumState.from_checkpoint.
 +
 +        diagnostics_path = os.environ.get("SHOPPING_GRPO_DIAGNOSTICS_PATH")
 +
 +        dynamic_sampling_config = self.config.get("shopping_dynamic_sampling", {})
 +        dynamic_sampling_enabled = bool(dynamic_sampling_config.get("enable", False))
++        curriculum_config = self.config.get("shopping_curriculum_sampling", {})
++        curriculum_enabled = bool(curriculum_config.get("enable", False))
++        trajectory_credit_config = self.config.get("shopping_trajectory_credit", {})
++        curriculum_runtime = None
++        if curriculum_enabled:
++            curriculum_runtime = EvidenceCurriculumRuntime(
++                OmegaConf.to_container(curriculum_config, resolve=True),
++                self.train_dataloader.dataset,
++                self.train_dataloader.collate_fn,
++                self.total_training_steps,
++            )
++            if self.global_steps > 0:
++                curriculum_runtime.restore(
++                    os.path.join(
++                        self.config.trainer.default_local_dir,
++                        f"global_step_{self.global_steps}",
++                    )
++                )
 +        if dynamic_sampling_enabled:
 +            dynamic_sampling_metric = dynamic_sampling_config.get("metric", "seq_reward")
 +            dynamic_max_gen_batches = int(dynamic_sampling_config.get("max_num_gen_batches", 0))
@@ -77,34 +107,77 @@
 +                    sort_keys=True,
 +                )
 +            )
-@@ -1409,2 +1483,4 @@
++
+         self.global_steps = 0
+ 
+         # load checkpoint and update weights before doing anything
+@@ -1406,14 +1503,17 @@
+         # add tqdm
+         progress_bar = tqdm(total=self.total_training_steps, initial=self.global_steps, desc="Training Progress")
+ 
 -        # we start from step 1
 -        self.global_steps += 1
 +        # The unpatched trainer uses a one-based in-flight step. Dynamic sampling
 +        # keeps the committed counter unchanged until an optimizer update occurs.
 +        if not dynamic_sampling_enabled:
 +            self.global_steps += 1
-@@ -1414,0 +1491 @@
+         last_val_metrics = None
+         self.max_steps_duration = 0
+ 
+         prev_step_profile = False
 +        first_step = self.global_steps + 1 if dynamic_sampling_enabled else self.global_steps
-@@ -1416 +1493 @@
+         curr_step_profile = (
 -            self.global_steps in self.config.global_profiler.steps
 +            first_step in self.config.global_profiler.steps
-@@ -1423,0 +1501,2 @@
+             if self.config.global_profiler.steps is not None
+             else False
+         )
+@@ -1421,6 +1521,14 @@
+ 
+         for epoch in range(current_epoch, self.config.trainer.total_epochs):
+             for batch_dict in self.train_dataloader:
 +                current_step = self.global_steps + 1 if dynamic_sampling_enabled else self.global_steps
 +                optimizer_updated = False
-@@ -1446 +1525 @@
++                if curriculum_runtime is not None:
++                    batch_dict, curriculum_selection = curriculum_runtime.select_batch(
++                        batch_dict,
++                        self.global_steps,
++                        dynamic_num_gen_batches if dynamic_sampling_enabled else 0,
++                    )
+                 if hasattr(self.actor_rollout_wg, "async_calls_finalize_fn_exec"):
+                     self.actor_rollout_wg.async_calls_finalize_fn_exec(blocking=False)
+                 metrics = {}
+@@ -1443,7 +1551,7 @@
+                 gen_batch = self._get_gen_batch(batch)
+ 
+                 # pass global_steps to trace
 -                gen_batch.meta_info["global_steps"] = self.global_steps
 +                gen_batch.meta_info["global_steps"] = current_step
-@@ -1464 +1543 @@
+                 rollout_n = self.config.actor_rollout_ref.rollout.n
+                 gen_batch_output = gen_batch.repeat(repeat_times=rollout_n, interleave=True)
+ 
+@@ -1461,14 +1569,15 @@
+                     combined_gen_batch = gen_batch_output
+                     num_sampled_prompts = len(gen_batch_output)
+ 
 -                is_last_step = self.global_steps >= self.total_training_steps
 +                is_last_step = current_step >= self.total_training_steps
-@@ -1471 +1550,2 @@
+                 with marked_timer("step", timing_raw):
+                     # generate a batch
+                     with marked_timer("gen", timing_raw, color="red"):
+                         if curr_step_profile:
+                             self.llm_server_manager.start_profile()
+                         combined_gen_output = self.async_rollout_manager.generate_sequences(combined_gen_batch)
 -                        self.checkpoint_manager.sleep_replicas()
 +                        if not dynamic_sampling_enabled:
 +                            self.checkpoint_manager.sleep_replicas()
-@@ -1524,0 +1605,214 @@
-+                        reward_tensor, reward_extra_infos_dict = extract_reward(batch)
-+
+                         if curr_step_profile:
+                             self.llm_server_manager.stop_profile()
+ 
+@@ -1524,6 +1633,341 @@
+                         # extract reward_tensor and reward_extra_infos_dict for training
+                         reward_tensor, reward_extra_infos_dict = extract_reward(batch)
+ 
 +                    if dynamic_sampling_enabled:
 +                        seq_rewards = reward_tensor.sum(dim=-1).detach().cpu().tolist()
 +                        batch_uids = batch.non_tensor_batch["uid"].tolist()
@@ -122,6 +195,12 @@
 +                            sampling_invalid=sampling_invalid, sampling_invalid_reasons=sampling_invalid_reasons,
 +                            tolerance=dynamic_reward_tolerance,
 +                        )
++                        if curriculum_runtime is not None:
++                            curriculum_runtime.update_groups(
++                                group_stats,
++                                batch.non_tensor_batch["shopping"].tolist(),
++                                self.global_steps,
++                            )
 +                        invalid_group_sizes = [
 +                            len(group["indices"])
 +                            for group in group_stats["groups"]
@@ -317,7 +396,7 @@
 +                                continue
 +                            images_seqlens_all.extend(multi_modal_input["images_seqlens"].tolist())
 +                        batch.meta_info["images_seqlens"] = images_seqlens_all
-@@ -1525,0 +1820,70 @@
++                        reward_tensor, reward_extra_infos_dict = extract_reward(batch)
 +                        metrics.update(
 +                            {
 +                                "group/generated": dynamic_generated_groups,
@@ -388,7 +467,7 @@
 +                        dynamic_no_purchase_success_groups = 0
 +                        dynamic_sampling_invalid_groups = 0
 +                        dynamic_generated_trajectories = 0
-@@ -1526,0 +1891,45 @@
++
 +                    if "shopping" not in batch.non_tensor_batch:
 +                        raise RuntimeError(
 +                            "Shopping GRPO requires AgentLoop shopping diagnostics"
@@ -434,34 +513,102 @@
 +                            }
 +                        )
 +
-@@ -1643 +2052 @@
+                     # Operating Mode Selection:
+                     # - Bypass mode: Sets old_log_probs = rollout_log_probs (2 policies: π_rollout, π_θ)
+                     # - Decoupled mode: Recomputes old_log_probs as proximal anchor (3 policies: π_rollout, π_old, π_θ)
+@@ -1631,6 +2075,17 @@
+                             norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
+                             config=self.config.algorithm,
+                         )
++                        # apply_evidence_credit delegates to project_token_advantages(...)
++                        # only after select_reward_varying_groups() accepted complete groups.
++                        credit_diagnostic = apply_evidence_credit(
++                            batch,
++                            OmegaConf.to_container(trajectory_credit_config, resolve=True),
++                        )
++                        metrics.update({
++                            "shopping_credit/applied": credit_diagnostic["applied"],
++                            "shopping_credit/fallback_count": credit_diagnostic["fallback_count"],
++                            "shopping_credit/mass_error": credit_diagnostic.get("mass_error", 0.0),
++                        })
+ 
+                     # update critic
+                     if self.use_critic:
+@@ -1640,13 +2095,16 @@
+                         metrics.update(critic_output_metrics)
+ 
+                     # implement critic warmup
 -                    if self.config.trainer.critic_warmup > self.global_steps:
 +                    if self.config.trainer.critic_warmup > current_step:
-@@ -1645 +2054 @@
+                         # Still in critic warmup, only update weights to wake up rollout replicas.
 -                        self.checkpoint_manager.update_weights(self.global_steps)
 +                        self.checkpoint_manager.update_weights(current_step)
-@@ -1649,0 +2059,3 @@
+                     else:
+                         # update actor
+                         with marked_timer("update_actor", timing_raw, color="red"):
+                             actor_output = self._update_actor(batch)
 +                        optimizer_updated = True
 +                        if dynamic_sampling_enabled:
 +                            self.global_steps = current_step
-@@ -1665 +2077 @@
+ 
+                         # Check if the ESI (Elastic Server Instance)/training plan is close to expiration.
+                         esi_close_to_expiration = should_save_ckpt_esi(
+@@ -1662,17 +2120,25 @@
+                         # 4. The ESI(Elastic Server Instance)/training plan is close to expiration.
+                         if self.config.trainer.save_freq > 0 and (
+                             is_last_step
 -                            or self.global_steps % self.config.trainer.save_freq == 0
 +                            or current_step % self.config.trainer.save_freq == 0
-@@ -1675 +2087 @@
+                             or esi_close_to_expiration
+                         ):
+                             if esi_close_to_expiration:
+                                 print("Force saving checkpoint: ESI instance expiration approaching.")
+                             with marked_timer("save_checkpoint", timing_raw, color="green"):
+                                 self._save_checkpoint()
++                                if curriculum_runtime is not None:
++                                    curriculum_runtime.save(
++                                        os.path.join(
++                                            self.config.trainer.default_local_dir,
++                                            f"global_step_{self.global_steps}",
++                                        ),
++                                        self.global_steps,
++                                    )
+ 
+                         # update weights from trainer to rollout
+                         with marked_timer("update_weights", timing_raw, color="red"):
 -                            self.checkpoint_manager.update_weights(self.global_steps)
 +                            self.checkpoint_manager.update_weights(current_step)
-@@ -1687 +2099 @@
+ 
+                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
+                         metrics.update(actor_output_metrics)
+@@ -1684,7 +2150,7 @@
+ 
+                 # validate
+                 if self.config.trainer.test_freq > 0 and (
 -                    is_last_step or self.global_steps % self.config.trainer.test_freq == 0
 +                    is_last_step or current_step % self.config.trainer.test_freq == 0
-@@ -1697 +2109 @@
+                 ):
+                     with marked_timer("testing", timing_raw, color="green"):
+                         val_metrics: dict = self._validate()
+@@ -1694,7 +2160,7 @@
+ 
+                 with marked_timer("stop_profile", timing_raw):
+                     next_step_profile = (
 -                        self.global_steps + 1 in self.config.global_profiler.steps
 +                        current_step + 1 in self.config.global_profiler.steps
-@@ -1715 +2127 @@
+                         if self.config.global_profiler.steps is not None
+                         else False
+                     )
+@@ -1712,10 +2178,23 @@
+                 # training metrics
+                 metrics.update(
+                     {
 -                        "training/global_step": self.global_steps,
 +                        "training/global_step": current_step,
-@@ -1716,0 +2129 @@
+                         "training/epoch": epoch,
 +                        "training/optimizer_updated": int(optimizer_updated),
-@@ -1718,0 +2132,12 @@
+                     }
+                 )
 +                if dynamic_sampling_enabled:
 +                    metrics.update(
 +                        {
@@ -474,7 +621,13 @@
 +                            ),
 +                        }
 +                    )
-@@ -1750 +2175,11 @@
+                 # collect metrics
+                 metrics.update(compute_data_metrics(batch=batch, use_critic=self.use_critic))
+                 # GDPO per-component reward metrics
+@@ -1747,10 +2226,25 @@
+                 )
+ 
+                 # TODO: make a canonical logger that supports various backend
 -                logger.log(data=metrics, step=self.global_steps)
 +                append_training_diagnostic(
 +                    diagnostics_path,
@@ -487,7 +640,8 @@
 +                    ),
 +                )
 +                logger.log(data=metrics, step=current_step)
-@@ -1753 +2188,6 @@
+ 
+                 progress_bar.update(1)
 -                self.global_steps += 1
 +                if dynamic_sampling_enabled and not optimizer_updated:
 +                    raise RuntimeError(
@@ -495,3 +649,6 @@
 +                    )
 +                if not dynamic_sampling_enabled:
 +                    self.global_steps += 1
+ 
+                 if is_last_step:
+                     if hasattr(self.actor_rollout_wg, "async_calls_finalize_fn_exec"):
