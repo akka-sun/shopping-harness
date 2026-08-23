@@ -41,7 +41,7 @@ def resolve_installed_ray_trainer() -> Path:
     import verl
 
     verl_source = Path(verl.__file__).resolve()
-    expected_environment = (PROJECT_ROOT / ".venv").resolve()
+    expected_environment = Path(sys.executable).absolute().parent.parent
     if not verl_source.is_relative_to(expected_environment):
         raise RuntimeError(f"verl.__file__ is not from the project environment: {verl_source}")
 
