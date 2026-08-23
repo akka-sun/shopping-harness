@@ -1,4 +1,4 @@
-"""Shopping GRPO 终局奖励的纯函数测试。"""
+"""Shopping GRPO Reward v3 terminal-contract tests."""
 
 import unittest
 
@@ -6,86 +6,131 @@ from shopping_grpo.training.grpo.adapter.runtime import (
     make_runtime_state,
     record_action_attempt,
     reward_breakdown,
-    validate_reward_components,
+    validate_reward,
 )
 
 
-def terminal_state(*, steps=8, components=None, native_reward=1.0):
+def reward_detail(
+    *,
+    reward_type="gold_purchase",
+    terminal_utility=1.0,
+    reward_valid=True,
+    purchase_success=True,
+    weighted_score=1.0,
+):
+    status = "pass" if reward_valid else "unverifiable"
+    return {
+        "reward_version": "shopsimulator-reward-v3",
+        "reward_type": reward_type,
+        "reward_valid": reward_valid,
+        "termination_reason": reward_type,
+        "target_asin_match": reward_type == "gold_purchase",
+        "hard_gates": {
+            "category": {
+                "status": status,
+                "passed": reward_valid,
+                "verifiable": reward_valid,
+                "comparator": "category_leaf_ancestor_chain",
+                "source_field": "category",
+            },
+            "budget": {
+                "status": status,
+                "passed": reward_valid,
+                "verifiable": reward_valid,
+                "comparator": "numeric_lte",
+                "source_field": "price",
+            },
+        },
+        "weighted_score": weighted_score,
+        "evidence_coverage": 1.0 if reward_valid else 0.0,
+        "dimension_scores": {
+            "brand": weighted_score,
+            "model": weighted_score,
+            "core_functions": weighted_score,
+            "key_options": weighted_score,
+        },
+        "terminal_utility": terminal_utility,
+        "purchase_success": purchase_success,
+        "sampling_invalid": not reward_valid,
+    }
+
+
+def terminal_state(*, detail=None):
+    detail = validate_reward(detail or reward_detail())
     state = make_runtime_state(task_id=1, max_steps=35)
-    state["steps"] = [{"index": index} for index in range(steps)]
     state.update(
         {
             "done": True,
             "terminal_result": {"done": True, "over": True},
-            "final_reward": native_reward,
-            "reward_components": components
-            or {"r_type": 1.0, "r_att": 1.0, "r_option": 1.0, "r_price": 1.0},
+            "final_reward": detail["terminal_utility"],
+            "reward_version": detail["reward_version"],
+            "reward_type": detail["reward_type"],
+            "reward_valid": detail["reward_valid"],
+            "reward_unverifiable": not detail["reward_valid"],
+            "reward_detail": detail,
         }
     )
     return state
 
 
 class ShoppingRewardTest(unittest.TestCase):
-    def test_full_success_gets_semantic_and_eight_step_efficiency_reward(self):
-        result = reward_breakdown(terminal_state(steps=8))
+    def test_gold_purchase_uses_verified_terminal_utility(self):
+        result = reward_breakdown(terminal_state())
 
-        self.assertAlmostEqual(result["full"], 1.0)
-        self.assertAlmostEqual(result["strict"], 1.0)
-        self.assertAlmostEqual(result["semantic"], 1.7)
-        self.assertAlmostEqual(result["efficiency"], 0.05 * (1 - 8 / 35))
-        self.assertAlmostEqual(result["total"], 1.7 + 0.05 * (1 - 8 / 35))
+        self.assertEqual(result["full"], 1.0)
+        self.assertEqual(result["strict"], 1.0)
+        self.assertEqual(result["semantic"], 1.0)
+        self.assertEqual(result["terminal_utility"], 1.0)
+        self.assertEqual(result["total"], 1.0)
+        self.assertFalse(result["sampling_invalid"])
 
-    def test_full_success_at_step_limit_has_no_efficiency_or_overlong_penalty(self):
-        result = reward_breakdown(terminal_state(steps=35))
-
-        self.assertEqual(result["efficiency"], 0.0)
-        self.assertEqual(result["penalty_overlong"], 0.0)
-        self.assertEqual(result["total"], 1.7)
-
-    def test_unfinished_assistant_gets_small_negative_reward(self):
-        state = make_runtime_state(task_id=1, max_steps=35)
-        state["termination_reason"] = "assistant_finished_without_environment_done"
-        state["error"] = state["termination_reason"]
-
-        result = reward_breakdown(state)
-
-        self.assertEqual(result["semantic"], 0.0)
-        self.assertEqual(result["penalty_unfinished"], 0.05)
-        self.assertEqual(result["total"], -0.05)
-
-    def test_reward_components_must_be_complete_finite_and_bounded(self):
-        with self.assertRaisesRegex(ValueError, "missing"):
-            validate_reward_components({"r_type": 1, "r_att": 1})
-        with self.assertRaisesRegex(ValueError, "finite"):
-            validate_reward_components(
-                {"r_type": 1, "r_att": 1, "r_option": float("nan"), "r_price": 1}
-            )
-        with self.assertRaisesRegex(ValueError, r"\[0, 1\]"):
-            validate_reward_components(
-                {"r_type": 1, "r_att": 1, "r_option": 1, "r_price": 1.1}
-            )
-
-    def test_partial_purchase_preserves_native_and_product_reward(self):
+    def test_valid_alternative_is_not_strict_success(self):
         state = terminal_state(
-            components={"r_type": 1, "r_att": 1, "r_option": 0.5, "r_price": 1},
-            native_reward=0.6,
+            detail=reward_detail(
+                reward_type="valid_alternative_purchase",
+                terminal_utility=0.55,
+                purchase_success=True,
+                weighted_score=0.8,
+            )
         )
 
         result = reward_breakdown(state)
 
         self.assertEqual(result["full"], 0.0)
-        self.assertEqual(result["strict"], 0.5)
-        self.assertEqual(result["native"], 0.6)
-        self.assertAlmostEqual(result["semantic"], 0.5 * 0.5 + 0.2 * 0.6)
+        self.assertEqual(result["strict"], 0.0)
+        self.assertEqual(result["purchase_success"], 1.0)
+        self.assertEqual(result["terminal_utility"], 0.55)
 
-    def test_malformed_terminal_components_are_infrastructure_invalid(self):
-        state = terminal_state()
-        state["reward_components"]["r_option"] = float("nan")
+    def test_reward_v3_requires_complete_finite_bounded_fields(self):
+        with self.assertRaisesRegex(ValueError, "reward_type"):
+            validate_reward({"reward_version": "shopsimulator-reward-v3"})
+
+        non_finite = reward_detail()
+        non_finite["terminal_utility"] = float("nan")
+        with self.assertRaisesRegex(ValueError, "finite"):
+            validate_reward(non_finite)
+
+        out_of_range = reward_detail()
+        out_of_range["weighted_score"] = 1.1
+        with self.assertRaisesRegex(ValueError, r"\[0, 1\]"):
+            validate_reward(out_of_range)
+
+    def test_reward_unverifiable_is_sampling_invalid(self):
+        state = terminal_state(
+            detail=reward_detail(
+                reward_type="reward_unverifiable",
+                terminal_utility=0.0,
+                reward_valid=False,
+                purchase_success=False,
+                weighted_score=0.0,
+            )
+        )
 
         result = reward_breakdown(state)
 
-        self.assertTrue(result["infrastructure_invalid"])
         self.assertEqual(result["total"], 0.0)
+        self.assertTrue(result["sampling_invalid"])
+        self.assertTrue(result["reward_unverifiable"])
 
     def test_same_action_on_same_page_within_three_attempts_is_repeated(self):
         state = make_runtime_state(task_id=1, max_steps=35)
