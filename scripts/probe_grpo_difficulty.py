@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import time
@@ -129,13 +130,18 @@ def _run_with_vllm(args):
         return execute_probe(args)
     if not 0.1 <= args.gpu_memory_utilization <= 0.99:
         raise SystemExit("--gpu-memory-utilization must be in [0.1, 0.99]")
+    server_env = os.environ.copy()
+    # FlashInfer's sampler build in the pinned vLLM stack is not compatible
+    # with every GPU/kernel combination (including the observed Blackwell
+    # setup); vLLM's native sampler is the safe fallback.
+    server_env["VLLM_USE_FLASHINFER_SAMPLER"] = "0"
     server = subprocess.Popen([
         sys.executable, "-m", "vllm.entrypoints.openai.api_server",
         "--model", str(args.model.resolve()), "--host", "127.0.0.1",
         "--port", "8000", "--dtype", "bfloat16",
         "--max-model-len", "24576",
         "--gpu-memory-utilization", str(args.gpu_memory_utilization),
-    ])
+    ], env=server_env)
     try:
         deadline = time.monotonic() + 300
         while time.monotonic() < deadline:
