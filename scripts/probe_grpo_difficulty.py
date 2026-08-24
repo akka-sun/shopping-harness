@@ -5,6 +5,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
+import sys
+import time
+from urllib.request import urlopen
 from pathlib import Path
 
 from shopping_grpo.evaluation.rollout import OpenAIChatClient, collect_for_task
@@ -32,6 +36,8 @@ def parse_args(argv=None):
     parser.add_argument("--seed", type=int, default=20260823)
     parser.add_argument("--max-environment-steps", type=int, default=35)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--no-launch-vllm", action="store_true")
+    parser.add_argument("--gpu-memory-utilization", type=float, default=0.8)
     return parser.parse_args(argv)
 
 
@@ -110,6 +116,44 @@ def execute_probe(args):
     return run_probe(request, rollout_one)
 
 
+def _endpoint_ready(base_url: str) -> bool:
+    try:
+        with urlopen(base_url.rstrip("/") + "/models", timeout=2):
+            return True
+    except Exception:
+        return False
+
+
+def _run_with_vllm(args):
+    if args.no_launch_vllm or _endpoint_ready(args.llm_base_url):
+        return execute_probe(args)
+    if not 0.1 <= args.gpu_memory_utilization <= 0.99:
+        raise SystemExit("--gpu-memory-utilization must be in [0.1, 0.99]")
+    server = subprocess.Popen([
+        sys.executable, "-m", "vllm.entrypoints.openai.api_server",
+        "--model", str(args.model.resolve()), "--host", "127.0.0.1",
+        "--port", "8000", "--dtype", "bfloat16",
+        "--max-model-len", "24576",
+        "--gpu-memory-utilization", str(args.gpu_memory_utilization),
+    ])
+    try:
+        deadline = time.monotonic() + 300
+        while time.monotonic() < deadline:
+            if server.poll() is not None:
+                raise SystemExit(f"vLLM exited before readiness (code {server.returncode})")
+            if _endpoint_ready(args.llm_base_url):
+                return execute_probe(args)
+            time.sleep(2)
+        raise SystemExit("timed out waiting for vLLM at " + args.llm_base_url)
+    finally:
+        if server.poll() is None:
+            server.terminate()
+            try:
+                server.wait(timeout=20)
+            except subprocess.TimeoutExpired:
+                server.kill()
+
+
 def main_for_test(argv=None):
     args = parse_args(argv)
     _validate(args)
@@ -117,7 +161,7 @@ def main_for_test(argv=None):
     print(json.dumps(audit, ensure_ascii=False, indent=2))
     if args.dry_run:
         return audit
-    execute_probe(args)
+    _run_with_vllm(args)
     return audit
 
 
