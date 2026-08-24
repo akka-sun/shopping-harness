@@ -142,7 +142,7 @@ def _run_with_vllm(args):
         "--max-model-len", "24576",
         "--gpu-memory-utilization", str(args.gpu_memory_utilization),
         "--enable-auto-tool-choice",
-        "--tool-call-parser", "qwen3_xml",
+        "--tool-call-parser", "qwen3_coder",
     ], env=server_env)
     try:
         deadline = time.monotonic() + 300
