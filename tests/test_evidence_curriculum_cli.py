@@ -29,6 +29,7 @@ def test_curriculum_entry_enables_features_without_creating_output(tmp_path):
     command, _ = build_command(args)
     assert "shopping_curriculum_sampling.enable=true" in command
     assert "shopping_curriculum_sampling.switch_ratio=0.30" in command
+    assert f"shopping_curriculum_sampling.manifest_path={manifest.resolve()}" in command
     assert "shopping_trajectory_credit.enable=true" in command
     assert not output.exists()
 

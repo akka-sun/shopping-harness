@@ -36,6 +36,7 @@ def build_command(args):
         [
             "shopping_curriculum_sampling.enable=true",
             "shopping_curriculum_sampling.switch_ratio=0.30",
+            f"shopping_curriculum_sampling.manifest_path={manifest}",
             "shopping_trajectory_credit.enable=true",
         ]
     )
