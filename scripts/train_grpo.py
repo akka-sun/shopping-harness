@@ -89,10 +89,20 @@ def build_command(args: argparse.Namespace) -> tuple[list[str], dict[str, str]]:
     val_data = _validated_path(args.val_data, "validation parquet")
     config = _validated_path(args.config, "GRPO example config")
     output = args.output.expanduser().resolve()
+    extra_overrides = _runtime_overrides(args)
+    resume_requested = any(
+        item.startswith("trainer.resume_mode=auto")
+        or item.startswith("trainer.resume_mode=resume_path")
+        for item in extra_overrides
+    )
     if output.exists():
         if not output.is_dir():
             raise SystemExit(f"output must be a directory: {output}")
-        if any(output.iterdir()):
+        has_checkpoint = any(
+            child.is_dir() and child.name.startswith("global_step_")
+            for child in output.iterdir()
+        )
+        if any(output.iterdir()) and not (resume_requested and has_checkpoint):
             raise SystemExit(f"output directory must be new or empty: {output}")
     if args.logger == "swanlab" and not os.environ.get("SWANLAB_API_KEY"):
         raise SystemExit("--logger swanlab requires SWANLAB_API_KEY")
@@ -124,7 +134,7 @@ def build_command(args: argparse.Namespace) -> tuple[list[str], dict[str, str]]:
                 "SWANLAB_LOG_DIR": str(output / "swanlab"),
             }
         )
-    overrides = _runtime_overrides(args)
+    overrides = extra_overrides
     command = [
         sys.executable,
         "-m",
