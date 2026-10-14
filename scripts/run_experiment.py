@@ -92,27 +92,7 @@ def _validate_settings(stage: str, settings: dict) -> None:
         if settings["train_ratio"] is not None and not 0 < float(settings["train_ratio"]) <= 1:
             raise ValueError("train_ratio must be in (0, 1]")
         return
-    _positive(
-        settings,
-        "learning_rate",
-        "rollout_number",
-        "prompt_batch_size",
-        "ppo_mini_batch_size",
-        "ppo_micro_batch_size",
-        "soft_length_threshold",
-        "max_environment_steps",
-    )
-    if not settings["dynamic_sampling"]:
-        raise ValueError("dynamic_sampling is fixed on for this repository")
-    if int(settings["max_environment_steps"]) != 35:
-        raise ValueError("max_environment_steps is fixed at 35 by the environment contract")
-    if int(settings["ppo_mini_batch_size"]) % int(settings["ppo_micro_batch_size"]):
-        raise ValueError("ppo_mini_batch_size must be divisible by ppo_micro_batch_size")
-    if settings["clip_mode"] not in {"symmetric", "clip_higher"}:
-        raise ValueError("clip_mode must be symmetric or clip_higher")
-    if min(float(settings["kl_coefficient"]), float(settings["length_penalty_per_step"]), float(settings["max_length_penalty"])) < 0:
-        raise ValueError("KL and length penalty coefficients must be non-negative")
-
+    raise ValueError("only SFT experiments are supported")
 
 def _python(root: Path) -> str:
     candidate = root / ".venv/bin/python"
@@ -167,69 +147,4 @@ def build_experiment(
             command.extend(("--train-ratio", str(settings["train_ratio"])))
         return command, environment, output
 
-    low, high = (0.2, 0.2) if settings["clip_mode"] == "symmetric" else (0.2, 0.28)
-    environment.update(
-        {
-            "SHOPPING_LENGTH_SHAPING_ENABLE": str(bool(settings["length_shaping_enabled"])).lower(),
-            "SHOPPING_SOFT_LENGTH_THRESHOLD": str(settings["soft_length_threshold"]),
-            "SHOPPING_LENGTH_PENALTY_PER_STEP": str(settings["length_penalty_per_step"]),
-            "SHOPPING_MAX_LENGTH_PENALTY": str(settings["max_length_penalty"]),
-        }
-    )
-    command = [
-        _python(root),
-        "scripts/train_grpo.py",
-        "--model", str(model or root / "outputs/models/sft-merged"),
-        "--train-data", str(train_data or root / "data/grpo/train.parquet"),
-        "--val-data", str(validation_data or root / "data/grpo/validation.parquet"),
-        "--output", str(output),
-        "--experiment-name", experiment["name"],
-        "--",
-        f"actor_rollout_ref.actor.optim.lr={settings['learning_rate']}",
-        f"actor_rollout_ref.rollout.n={settings['rollout_number']}",
-        f"data.train_batch_size={settings['prompt_batch_size']}",
-        f"actor_rollout_ref.actor.ppo_mini_batch_size={settings['ppo_mini_batch_size']}",
-        f"actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu={settings['ppo_micro_batch_size']}",
-        f"actor_rollout_ref.actor.clip_ratio_low={low}",
-        f"actor_rollout_ref.actor.clip_ratio_high={high}",
-        f"actor_rollout_ref.actor.use_kl_loss={str(bool(settings['kl_enabled'])).lower()}",
-        f"actor_rollout_ref.actor.kl_loss_coef={settings['kl_coefficient']}",
-    ]
-    return command, environment, output
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("experiment_name")
-    parser.add_argument("--config", type=Path, default=DEFAULT_REGISTRY)
-    parser.add_argument("--output-root", type=Path, default=Path("outputs/ablations"))
-    parser.add_argument("--model")
-    parser.add_argument("--train-data", type=Path)
-    parser.add_argument("--validation-data", type=Path)
-    parser.add_argument("--set", action="append", default=[], metavar="KEY=VALUE")
-    parser.add_argument("--dry-run", action="store_true")
-    return parser.parse_args()
-
-
-def main() -> None:
-    args = parse_args()
-    experiment = resolve_experiment(
-        load_registry(args.config), args.experiment_name, args.set
-    )
-    command, environment, output = build_experiment(
-        experiment,
-        output_root=args.output_root,
-        model=args.model,
-        train_data=args.train_data,
-        validation_data=args.validation_data,
-    )
-    print(json.dumps({"experiment": experiment, "command": command, "output": str(output)}, indent=2))
-    if args.dry_run:
-        return
-    if output.exists() and any(output.iterdir()):
-        raise SystemExit(f"experiment output directory must be new or empty: {output}")
-    raise SystemExit(subprocess.call(command, cwd=ROOT, env=environment))
-
-
-if __name__ == "__main__":
-    main()
+    raise ValueError("only SFT experiments are supported")

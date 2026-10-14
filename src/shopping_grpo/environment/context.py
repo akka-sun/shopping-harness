@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 import json
+import time
+import urllib.error
 from urllib.request import Request, urlopen
 
 
@@ -43,13 +45,13 @@ def compact_chat_messages(messages, tools, count_tokens, max_input_tokens):
         )
 
     # anchor 是 system/user 等固定提示；groups 才是可以整体删除的交互历史。
-    anchor, groups = _split_chat_tool_groups(original)
+    anchor, groups, tail = _split_chat_tool_groups(original)
     if not groups:
         raise ContextBudgetError(
             f"required prompt uses {original_tokens} tokens, above input budget {max_input_tokens}"
         )
 
-    latest_only = anchor + groups[-1]
+    latest_only = anchor + groups[-1] + tail
     latest_tokens = int(count_tokens(latest_only, tools))
     if latest_tokens > int(max_input_tokens):
         raise ContextBudgetError(
@@ -62,7 +64,7 @@ def compact_chat_messages(messages, tools, count_tokens, max_input_tokens):
     kept_tokens = latest_tokens
     while low <= high:
         middle = (low + high) // 2
-        candidate = anchor + _flatten(groups[-middle:])
+        candidate = anchor + _flatten(groups[-middle:]) + tail
         candidate_tokens = int(count_tokens(candidate, tools))
         if candidate_tokens <= int(max_input_tokens):
             kept_groups = middle
@@ -71,7 +73,7 @@ def compact_chat_messages(messages, tools, count_tokens, max_input_tokens):
         else:
             high = middle - 1
 
-    compacted = anchor + _flatten(groups[-kept_groups:])
+    compacted = anchor + _flatten(groups[-kept_groups:]) + tail
     removed = groups[:-kept_groups]
     return compacted, ContextWindowStats(
         original_tokens=original_tokens,
@@ -147,6 +149,31 @@ def compact_token_trajectory(
     )
 
 
+TOKENIZE_RETRIES = 2
+
+
+def _post_tokenize(url, payload, headers, timeout):
+    """Call local vLLM tokenizer with bounded retries for transient HTTP faults."""
+    for attempt in range(TOKENIZE_RETRIES + 1):
+        try:
+            request = Request(
+                url,
+                data=json.dumps(payload).encode("utf-8"),
+                headers=headers,
+                method="POST",
+            )
+            with urlopen(request, timeout=timeout) as raw:
+                return json.loads(raw.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            if exc.code not in {400, 408, 429, 500, 502, 503, 504} or attempt >= TOKENIZE_RETRIES:
+                raise
+        except (urllib.error.URLError, TimeoutError, ConnectionError):
+            if attempt >= TOKENIZE_RETRIES:
+                raise
+        time.sleep(attempt + 1)
+    raise AssertionError("unreachable")
+
+
 class VllmChatTokenCounter:
     """Count the exact rendered chat tokens through the serving vLLM tokenizer."""
 
@@ -175,14 +202,7 @@ class VllmChatTokenCounter:
         if self.transport is not None:
             response = self.transport(self.url, payload, headers, self.timeout)
         else:
-            request = Request(
-                self.url,
-                data=json.dumps(payload).encode("utf-8"),
-                headers=headers,
-                method="POST",
-            )
-            with urlopen(request, timeout=self.timeout) as raw:
-                response = json.loads(raw.read().decode("utf-8"))
+            response = _post_tokenize(self.url, payload, headers, self.timeout)
         count = response.get("count")
         if not isinstance(count, int) or count < 0:
             raise ValueError("vLLM /tokenize response is missing a non-negative integer count")
@@ -212,14 +232,7 @@ class VllmTextTokenCounter:
         if self.transport is not None:
             response = self.transport(self.url, payload, headers, self.timeout)
         else:
-            request = Request(
-                self.url,
-                data=json.dumps(payload).encode("utf-8"),
-                headers=headers,
-                method="POST",
-            )
-            with urlopen(request, timeout=self.timeout) as raw:
-                response = json.loads(raw.read().decode("utf-8"))
+            response = _post_tokenize(self.url, payload, headers, self.timeout)
         count = response.get("count")
         if not isinstance(count, int) or count < 0:
             raise ValueError("vLLM /tokenize response is missing a non-negative integer count")
@@ -234,11 +247,20 @@ def _split_chat_tool_groups(messages):
     anchor = messages[:first_assistant]
     history = messages[first_assistant:]
     groups = []
+    tail = []
     index = 0
     while index < len(history):
         assistant = history[index]
         if assistant.get("role") != "assistant" or not assistant.get("tool_calls"):
-            raise ContextBudgetError("chat history is not a sequence of complete assistant/tool groups")
+            # Request-only Harness/guard guidance is appended as a user
+            # message after the canonical assistant/tool history.  It is part
+            # of the required current-turn prompt, not a removable tool group.
+            tail = history[index:]
+            if any(message.get("role") != "user" for message in tail):
+                raise ContextBudgetError(
+                    "chat history is not a sequence of complete assistant/tool groups"
+                )
+            break
         call_ids = {
             call.get("id")
             for call in assistant.get("tool_calls") or []
@@ -255,7 +277,7 @@ def _split_chat_tool_groups(messages):
         if len(group) == 1:
             raise ContextBudgetError("assistant tool call is missing its tool response")
         groups.append(group)
-    return anchor, groups
+    return anchor, groups, tail
 
 
 def _flatten(groups):

@@ -9,13 +9,20 @@ import os
 import time
 import traceback
 from datetime import datetime, timezone
+from copy import deepcopy
 from http.client import RemoteDisconnected
 from urllib.error import URLError
 from pathlib import Path
 from urllib.request import Request, urlopen
 from uuid import uuid4
 
-from shopping_grpo.environment.actions import action_guard_tool_message, action_reject_reason
+from shopping_grpo.environment.actions import (
+    action_guard_tool_message,
+    action_reject_reason,
+    available_tool_names,
+    clickable_buttons,
+    product_ids,
+)
 from shopping_grpo.environment.context import (
     ContextBudgetError,
     VllmChatTokenCounter,
@@ -49,6 +56,106 @@ SYSTEM_PROMPT = """你是一个购物 Agent，负责在 ShopSimulator 中替用�
 MAX_BLOCKED_TOOL_CALLS = 3
 MODEL_COMPLETION_RETRIES = 2
 MODEL_RETRY_DELAY_SECONDS = 1
+
+
+def _guard_recovery_message(observation, tool_schemas):
+    """Give the model an exact, ephemeral contract for the recovery turn."""
+    signatures = []
+    for schema in tool_schemas:
+        function = schema.get("function") or {}
+        parameters = function.get("parameters") or {}
+        properties = parameters.get("properties") or {}
+        required = set(parameters.get("required") or [])
+        fields = ", ".join(
+            f'{name}{" (required)" if name in required else ""}'
+            for name in properties
+        ) or "no parameters; use {}"
+        signatures.append(f'- {function.get("name")}: {fields}')
+    visible_asins = product_ids(observation)
+    visible_buttons = clickable_buttons(observation)
+    evidence = []
+    if visible_asins:
+        evidence.append("Visible ASINs: " + ", ".join(visible_asins))
+    if visible_buttons:
+        evidence.append("Visible buttons: " + ", ".join(visible_buttons))
+    return {
+        "role": "user",
+        "content": (
+            "[ACTION_GUARD_RECOVERY]\n"
+            "Your previous action was rejected and was not executed. For this one recovery "
+            "turn, call exactly one tool from the list below. Do not call any tool omitted "
+            "from this list. Use exactly the declared JSON fields and no extra fields.\n"
+            + "\n".join(signatures)
+            + ("\n" + "\n".join(evidence) if evidence else "")
+        ),
+    }
+
+
+def _guard_recovery_tools(observation, tool_schemas):
+    """Constrain recovery arguments to targets visible on the current page.
+
+    Tool-name filtering alone still lets the policy reuse an ASIN or option
+    from an older observation.  On a recovery turn, expose the same public
+    actions but narrow target arguments to the current observation.  The
+    canonical schemas are copied so normal turns remain unchanged.
+    """
+    allowed_names = available_tool_names(observation)
+    visible_asins = product_ids(observation)
+    visible_buttons = [
+        button
+        for button in clickable_buttons(observation)
+        if button.casefold() not in {
+            "description", "features", "reviews", "attributes",
+            "next >", "< prev", "back to search", "buy now",
+        }
+    ]
+    recovery = []
+    for schema in tool_schemas:
+        function = schema.get("function") or {}
+        name = function.get("name")
+        if name not in allowed_names:
+            continue
+        narrowed = deepcopy(schema)
+        properties = (
+            narrowed.get("function", {})
+            .get("parameters", {})
+            .get("properties", {})
+        )
+        if name == "open_product" and visible_asins and "asin" in properties:
+            properties["asin"]["enum"] = visible_asins
+        elif name == "select_option" and visible_buttons and "value" in properties:
+            properties["value"]["enum"] = visible_buttons
+        recovery.append(narrowed)
+    return recovery
+
+
+def _purchase_checkpoint_message(required_options=()):
+    """A one-turn, state-triggered check before an irreversible purchase.
+
+    This is deliberately independent of retrieval: whether a memory happens
+    to pass a semantic threshold must not decide if the policy rechecks the
+    selected variant immediately before ``buy_now``.
+    """
+    explicit = ""
+    if required_options:
+        explicit = (
+            " The task's explicit required option labels are: "
+            + "; ".join(str(value) for value in required_options)
+            + ". If one is visible on this page, select that exact label before buying."
+        )
+    return {
+        "role": "user",
+        "content": (
+            "[PURCHASE_CHECKPOINT]\n"
+            "Before any buy_now call on this turn, compare the CURRENT selected "
+            "options and current price with every explicit user requirement. "
+            "If an explicitly requested colour/model/size/packaging/version is "
+            "not exactly represented by the selected options, do NOT buy: select "
+            "the exact visible matching option, or return to search if none exists. "
+            "Do not treat a same-product but different variant as acceptable."
+            + explicit
+        ),
+    }
 
 
 def rollout_interrupted(signum, frame):
@@ -266,7 +373,11 @@ def completed_task_attempts(path):
                 row = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if "task_id" in row:
+            # Infrastructure failures are durable audit rows, not completed
+            # benchmark attempts.  A resumed collection must retry the same
+            # task; summary aggregation intentionally keeps the last row for a
+            # task so the successful retry supersedes this diagnostic record.
+            if "task_id" in row and not _is_infrastructure_failure(row):
                 done.add((int(row["task_id"]), int(row.get("attempt_index", 0))))
     return done
 
@@ -279,6 +390,8 @@ def collect_for_task(
     max_steps=30,
     tools=None,
     attempt_index=0,
+    harness_bank=None,
+    harness_semantic_gate=None,
 ):
     """执行一个任务并返回完整轨迹；所有异常都会被写入轨迹后再释放环境。"""
     trajectory = {
@@ -299,6 +412,7 @@ def collect_for_task(
         "done": False,
         "error": None,
         "release_error": None,
+        "harness_guidance": [],
     }
     env = env_factory(base_url=base_url)
     try:
@@ -318,10 +432,119 @@ def collect_for_task(
         tool_schemas = tools or SHOP_TOOL_SCHEMAS
         consecutive_blocked_calls = 0
         latest_observation_truncated = False
+        harness_state = None
+        harness_guided_products = set()
+        purchase_checkpointed_products = set()
+        pending_option_value = None
+        forced_buy_value = None
+        if harness_bank is not None:
+            # Harness is an optional repository-level extension.  Keep the
+            # baseline evaluation path independent when no bank is supplied.
+            from Harness.runtime import HarnessState
+
+            harness_state = HarnessState()
+            harness_state.update(
+                tool_name=None,
+                parameters=None,
+                observation=latest_observation,
+            )
 
         while len(trajectory["steps"]) < int(max_steps):
             # 先请求模型，再校验动作；工具结果会追加到 messages，成为下一轮上下文。
-            assistant = client.complete(messages, tool_schemas)
+            request_messages = messages
+            # After a guard rejection, its tool message is the most precise
+            # recovery instruction: it names the current visible targets.
+            # Appending generic Harness guidance after that message can dilute
+            # it and caused models to repeat stale-page actions.  Resume
+            # Harness retrieval only after one legal environment action.
+            # The SFT policy already handles reversible search and navigation.
+            # Broad candidate-stage guidance changed otherwise-correct search
+            # paths and made a few generic high-confidence artifacts dominate
+            # every task.  Apply learned knowledge only at the irreversible
+            # purchase decision, where it can prevent a bad purchase without
+            # steering candidate discovery.
+            if (
+                harness_state is not None
+                and harness_state.phase == "ready_to_buy"
+                and consecutive_blocked_calls == 0
+                and (harness_state.current_product_id or "<unknown>")
+                not in harness_guided_products
+            ):
+                from Harness.integration import with_guidance
+
+                if harness_semantic_gate is not None:
+                    guidance = harness_semantic_gate.select(
+                        instruction=str(initial.get("instruction") or ""),
+                        observation=latest_observation,
+                        state=harness_state,
+                        bank=harness_bank,
+                    )
+                else:
+                    guidance = harness_bank.match(harness_state, memory_limit=1)
+                harness_guided_products.add(
+                    harness_state.current_product_id or "<unknown>"
+                )
+                if harness_semantic_gate is not None:
+                    trajectory.setdefault("harness_gate_decisions", []).append(
+                        dict(harness_semantic_gate.last_decision)
+                    )
+                request_messages = with_guidance(messages, guidance)
+                if guidance.message:
+                    trajectory["harness_guidance"].append(
+                        {
+                            "step_index": len(trajectory["steps"]),
+                            "phase": harness_state.phase,
+                            "skill_id": (
+                                guidance.skill.get("skill_id") if guidance.skill else None
+                            ),
+                            "memory_ids": [
+                                item.get("memory_id") for item in guidance.memories
+                            ],
+                        }
+                    )
+            if (
+                harness_state is not None
+                and harness_state.phase == "ready_to_buy"
+                and consecutive_blocked_calls == 0
+                and (harness_state.current_product_id or "<unknown>")
+                not in purchase_checkpointed_products
+            ):
+                # Keep this independent of semantic retrieval.  It addresses
+                # a state-local failure mode (buying a sibling variant) and is
+                # intentionally issued once per product to avoid looping.
+                request_messages = [
+                    *request_messages,
+                    _purchase_checkpoint_message(initial.get("goal_options") or ()),
+                ]
+                purchase_checkpointed_products.add(
+                    harness_state.current_product_id or "<unknown>"
+                )
+            request_tools = tool_schemas
+            if forced_buy_value is not None:
+                request_messages = [
+                    *request_messages,
+                    {
+                        "role": "user",
+                        "content": (
+                            "[OPTION_CORRECTION_COMPLETE] The exact required option "
+                            f"{forced_buy_value} is now selected. Do not change it or "
+                            "inspect another option; call buy_now now."
+                        ),
+                    },
+                ]
+                request_tools = [
+                    schema for schema in tool_schemas
+                    if (schema.get("function") or {}).get("name") == "buy_now"
+                ]
+            if consecutive_blocked_calls > 0:
+                request_tools = _guard_recovery_tools(
+                    latest_observation, tool_schemas
+                )
+                request_messages = [
+                    *request_messages,
+                    _guard_recovery_message(latest_observation, request_tools),
+                ]
+            assistant = client.complete(request_messages, request_tools)
             context_tokens = getattr(client, "last_context_tokens", None)
             if context_tokens is not None:
                 trajectory["context_turn_tokens"].append(
@@ -355,10 +578,21 @@ def collect_for_task(
             tool_call = tool_calls[0]
             try:
                 name, arguments = _tool_call_name_args(tool_call)
+                if forced_buy_value is not None and name != "buy_now":
+                    # The exact required option is already selected.  If the
+                    # model nevertheless emits another reversible action,
+                    # collapse it to the safe irreversible action instead of
+                    # allowing an option-oscillation loop.
+                    tool_call = {
+                        **tool_call,
+                        "function": {"name": "buy_now", "arguments": "{}"},
+                    }
+                    name, arguments = "buy_now", {}
                 reason = action_reject_reason(
                     name,
                     arguments,
                     latest_observation,
+                    instruction=str(initial.get("instruction") or task.get("instruction") or ""),
                 )
             except Exception as exc:
                 reason = f"invalid_tool_call:{exc.__class__.__name__}"
@@ -375,6 +609,21 @@ def collect_for_task(
                 )
                 messages.append(assistant)
                 messages.append(action_guard_tool_message(tool_call, reason, latest_observation))
+                if str(reason).startswith("buy_option_conflict:"):
+                    marker = "visible_exact_match="
+                    pending_option_value = (
+                        str(reason).split(marker, 1)[1] if marker in str(reason) else None
+                    ) or None
+                if harness_state is not None:
+                    try:
+                        rejected_name, rejected_arguments = _tool_call_name_args(tool_call)
+                    except Exception:
+                        rejected_name, rejected_arguments = None, None
+                    harness_state.record_rejected(
+                        tool_name=rejected_name,
+                        parameters=rejected_arguments,
+                        observation=latest_observation,
+                    )
                 if consecutive_blocked_calls >= MAX_BLOCKED_TOOL_CALLS:
                     trajectory["status"] = "invalid_action_limit"
                     break
@@ -400,10 +649,21 @@ def collect_for_task(
             trajectory["steps"].append(step)
             consecutive_blocked_calls = 0
             latest_observation = step["observation"]
+            if pending_option_value is not None and step["tool_name"] == "select_option":
+                if str(step["parameters"].get("value", "")) == pending_option_value:
+                    forced_buy_value = pending_option_value
+                    pending_option_value = None
             latest_observation_truncated = bool(
                 (step.get("projection") or {}).get("truncated")
             )
             messages.append(_tool_message(tool_call, step))
+            if harness_state is not None:
+                harness_state.update(
+                    tool_name=step["tool_name"],
+                    parameters=step["parameters"],
+                    observation=step["observation"],
+                    done=step["done"],
+                )
             if step["done"]:
                 trajectory["status"] = "done"
                 trajectory["terminal_result"] = step["result"]
@@ -458,10 +718,16 @@ def collect_tasks(
     max_steps=30,
     env_factory=ShopAgentEnv,
     attempts_per_task=1,
+    harness_bank=None,
+    harness_semantic_gate=None,
+    infrastructure_retries=0,
 ):
     attempts_per_task = int(attempts_per_task)
     if attempts_per_task < 1:
         raise ValueError("attempts_per_task must be at least 1")
+    infrastructure_retries = int(infrastructure_retries)
+    if infrastructure_retries < 0:
+        raise ValueError("infrastructure_retries must be non-negative")
     done = completed_task_attempts(output_path)
     written = []
     for task in tasks:
@@ -469,20 +735,29 @@ def collect_tasks(
         for attempt_index in range(attempts_per_task):
             if (task_id, attempt_index) in done:
                 continue
-            trajectory = collect_for_task(
-                task,
-                client=client,
-                env_factory=env_factory,
-                base_url=base_url,
-                max_steps=max_steps,
-                attempt_index=attempt_index,
-            )
-            append_jsonl(output_path, [trajectory])
-            written.append(trajectory)
-            if _is_infrastructure_failure(trajectory):
-                raise CollectionInfrastructureError(
-                    "collection infrastructure failure; stopped before the next task"
+            for infrastructure_attempt in range(infrastructure_retries + 1):
+                trajectory = collect_for_task(
+                    task,
+                    client=client,
+                    env_factory=env_factory,
+                    base_url=base_url,
+                    max_steps=max_steps,
+                    attempt_index=attempt_index,
+                    harness_bank=harness_bank,
+                    harness_semantic_gate=harness_semantic_gate,
                 )
+                append_jsonl(output_path, [trajectory])
+                written.append(trajectory)
+                if not _is_infrastructure_failure(trajectory):
+                    break
+                if infrastructure_attempt >= infrastructure_retries:
+                    raise CollectionInfrastructureError(
+                        "collection infrastructure failure; retry limit reached"
+                    )
+                # Recreate the environment on the next pass.  collect_for_task
+                # always releases in finally, so this retry cannot reuse a
+                # poisoned lease or stale client-side state.
+                time.sleep(min(2 ** infrastructure_attempt, 8))
     return written
 
 

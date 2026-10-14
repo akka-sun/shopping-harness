@@ -1,5 +1,6 @@
 import inspect
 import unittest
+from urllib.error import HTTPError
 
 from shopping_grpo.environment import client as shop_http_env
 
@@ -104,6 +105,21 @@ class ShopAgentEnvTest(unittest.TestCase):
 
         with self.assertRaises(shop_http_env.ShopEnvironmentError):
             env.reset(0)
+
+    def test_transient_http_405_is_retried_before_action_is_accepted(self):
+        transient = HTTPError("http://shop.test", 405, "METHOD NOT ALLOWED", {}, None)
+        transport = FakeTransport([
+            transient,
+            {"result": {"instruction": "找乳胶枕", "env_idx": 3, "idx": 0}},
+        ])
+        env = shop_http_env.ShopAgentEnv(transport=transport)
+
+        with unittest.mock.patch.object(shop_http_env.time, "sleep") as sleep:
+            result = env.reset(0)
+
+        self.assertEqual(result["env_idx"], 3)
+        self.assertEqual(len(transport.calls), 2)
+        sleep.assert_called_once_with(1)
 
     def test_context_manager_releases_after_http_error(self):
         transport = FakeTransport(

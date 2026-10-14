@@ -5,6 +5,7 @@
 """
 
 import json
+import time
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -92,10 +93,35 @@ class ShopAgentEnv:
 
     def _call(self, payload):
         """统一处理 HTTP、环境错误和结构化协议错误。"""
-        try:
-            response = self._send(payload)
-        except (HTTPError, URLError, OSError) as exc:
-            raise ShopHttpError(f"ShopSimulator HTTP request failed: {exc}") from exc
+        # Allow the embedded ShopSimulator a short initialization window;
+        # its first reset may return 502 while worker environments warm up.
+        for attempt in range(10):
+            try:
+                response = self._send(payload)
+                break
+            except HTTPError as exc:
+                # The deployed ShopSimulator occasionally returns a transient
+                # 405 before routing the POST.  Because the server explicitly
+                # rejected the method, the shopping action was not accepted;
+                # this narrow retry is safe.  Do not retry timeouts or generic
+                # transport failures, which may have executed server-side.
+                # The embedded service can briefly return 502 while its
+                # worker pool is finishing initialization.  Retrying this
+                # narrow, non-accepted reset request is safe and prevents a
+                # startup race from aborting a full benchmark.
+                if exc.code not in {405, 502} or attempt >= 9:
+                    raise ShopHttpError(f"ShopSimulator HTTP request failed: {exc}") from exc
+                if exc.code == 502 and payload.get("action") == "reset":
+                    # A failed reset does not return a lease, while a stale
+                    # lease from an interrupted run can exhaust the pool.
+                    # Reset the server-side pool before the next attempt.
+                    try:
+                        self._send({"action": "release_all"})
+                    except Exception:
+                        pass
+                time.sleep(attempt + 1)
+            except (URLError, OSError) as exc:
+                raise ShopHttpError(f"ShopSimulator HTTP request failed: {exc}") from exc
 
         if not isinstance(response, dict):
             raise ShopProtocolError("ShopSimulator response must be a JSON object")

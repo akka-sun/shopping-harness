@@ -21,7 +21,7 @@ if ! command -v uv >/dev/null 2>&1; then
 fi
 
 cd "${ROOT}"
-uv sync --python "${MAIN_PYTHON}" --extra sft --extra grpo
+uv sync --python "${MAIN_PYTHON}" --extra sft
 
 if [[ ! -x "${ENV_DIR}/bin/python" ]]; then
   uv venv --python "${SHOPSIM_PYTHON}" "${ENV_DIR}"
@@ -52,8 +52,6 @@ fi
 cd "${SHOP_ENV_ROOT}"
 PYTHONPATH=. "${ENV_DIR}/bin/python" scripts/build_index.py
 
-cd "${ROOT}"
-"${ROOT}/.venv/bin/python" scripts/apply_verl_dynamic_sampling_patch.py
 
 echo "Shopping Agent training environment is ready."
 echo "Product SHA-256: ${actual_sha256}"

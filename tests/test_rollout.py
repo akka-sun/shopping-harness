@@ -6,7 +6,7 @@ from pathlib import Path
 from urllib.error import URLError
 from unittest.mock import patch
 
-from shopping_grpo.environment.actions import action_guard_tool_message
+from shopping_grpo.environment.actions import action_guard_tool_message, available_tool_names
 from shopping_grpo.environment.client import ShopEnvironmentError
 from shopping_grpo.evaluation.rollout import (
     CollectionInfrastructureError,
@@ -18,6 +18,7 @@ from shopping_grpo.evaluation.rollout import (
     load_tasks,
     rollout_interrupted,
 )
+from Harness.runtime import RuntimeGuidance
 
 
 def search_results_observation():
@@ -281,6 +282,206 @@ class RolloutTest(unittest.TestCase):
             )
         )
 
+    def test_guard_recovery_request_is_not_diluted_by_harness_guidance(self):
+        class AlwaysGuidance:
+            def match(self, state, **kwargs):
+                return RuntimeGuidance(None, (), "[HARNESS_GUIDANCE]\ngeneric advice")
+
+        class SnapshotClient(MockClient):
+            def complete(self, messages, tools):
+                self.requests.append(
+                    {"messages": json.loads(json.dumps(messages)), "tools": tools}
+                )
+                return self.messages.pop(0)
+
+        client = SnapshotClient(
+            [
+                assistant_tool("search_products", {"query": "乳胶枕"}, "call_search"),
+                assistant_tool("view_features", {}, "call_invalid"),
+                assistant_tool("open_product", {"asin": "100000000001"}, "call_open"),
+                assistant_tool("buy_now", {}, "call_buy"),
+            ]
+        )
+        trajectory = collect_for_task(
+            {"task_id": 10}, client=client, env_factory=FakeEnv,
+            harness_bank=AlwaysGuidance(), max_steps=4,
+        )
+
+        self.assertEqual(trajectory["status"], "done")
+        self.assertFalse(
+            any(
+                "HARNESS_GUIDANCE" in str(message.get("content") or "")
+                for request in client.requests[:3]
+                for message in request["messages"]
+            )
+        )
+        recovery_messages = client.requests[2]["messages"]
+        self.assertEqual(recovery_messages[-2]["role"], "tool")
+        self.assertIn("本地动作守卫拒绝", recovery_messages[-2]["content"])
+        self.assertEqual(recovery_messages[-1]["role"], "user")
+        self.assertIn("ACTION_GUARD_RECOVERY", recovery_messages[-1]["content"])
+        self.assertIn("open_product: asin (required)", recovery_messages[-1]["content"])
+        self.assertNotIn("view_features:", recovery_messages[-1]["content"])
+        self.assertNotIn("HARNESS_GUIDANCE", recovery_messages[-1]["content"])
+        recovery_tools = {
+            schema["function"]["name"] for schema in client.requests[2]["tools"]
+        }
+        self.assertEqual(
+            recovery_tools,
+            {"open_product", "back_to_search", "finish_without_purchase"},
+        )
+        open_schema = next(
+            schema for schema in client.requests[2]["tools"]
+            if schema["function"]["name"] == "open_product"
+        )
+        self.assertEqual(
+            open_schema["function"]["parameters"]["properties"]["asin"]["enum"],
+            ["100000000001"],
+        )
+
+    def test_harness_guidance_is_injected_only_before_irreversible_purchase(self):
+        class AlwaysGuidance:
+            def match(self, state, **kwargs):
+                return RuntimeGuidance(None, (), "[HARNESS_GUIDANCE]\npurchase preflight")
+
+        class SnapshotClient(MockClient):
+            def complete(self, messages, tools):
+                self.requests.append(
+                    {"messages": json.loads(json.dumps(messages)), "tools": tools}
+                )
+                return self.messages.pop(0)
+
+        class ReadyToBuyEnv(FakeEnv):
+            def step(self, action):
+                self.actions.append(action)
+                if action == "search[乳胶枕]":
+                    return {"instruction": search_results_observation(), "reward": 0.0, "done": False}
+                if action == "click[100000000001]":
+                    return {
+                        "instruction": 'detail\n\n可点击的按钮: ["红色", "Buy Now"]',
+                        "reward": 0.0, "done": False,
+                    }
+                if action == "click[红色]":
+                    return {
+                        "instruction": 'selected\n\n可点击的按钮: ["红色", "Buy Now"]',
+                        "reward": 0.0, "done": False,
+                    }
+                return {
+                    "instruction": "done", "reward": 1.0, "done": True, "over": True,
+                    "purchase": {"asin": "A1"},
+                    "reward_detail": {"r_type": 1, "r_att": 1, "r_option": 1, "r_price": 1},
+                }
+
+        client = SnapshotClient(
+            [
+                assistant_tool("search_products", {"query": "乳胶枕"}, "call_search"),
+                assistant_tool("open_product", {"asin": "100000000001"}, "call_open"),
+                assistant_tool("select_option", {"value": "红色"}, "call_option"),
+                assistant_tool("buy_now", {}, "call_buy"),
+            ]
+        )
+        trajectory = collect_for_task(
+            {"task_id": 10}, client=client, env_factory=ReadyToBuyEnv,
+            harness_bank=AlwaysGuidance(), max_steps=5,
+        )
+
+        self.assertEqual(trajectory["status"], "done")
+        for request in client.requests[:3]:
+            self.assertFalse(
+                any(
+                    "HARNESS_GUIDANCE" in str(message.get("content") or "")
+                    for message in request["messages"]
+                )
+            )
+        self.assertIn(
+            "HARNESS_GUIDANCE",
+            "\n".join(str(message.get("content") or "") for message in client.requests[3]["messages"]),
+        )
+        self.assertIn("PURCHASE_CHECKPOINT", client.requests[3]["messages"][-1]["content"])
+
+    def test_purchase_guidance_is_injected_once_per_product(self):
+        class AlwaysGuidance:
+            def match(self, state, **kwargs):
+                return RuntimeGuidance(None, (), "[HARNESS_GUIDANCE]\npurchase preflight")
+
+        class SnapshotClient(MockClient):
+            def complete(self, messages, tools):
+                self.requests.append(
+                    {"messages": json.loads(json.dumps(messages)), "tools": tools}
+                )
+                return self.messages.pop(0)
+
+        class VerificationEnv(FakeEnv):
+            def step(self, action):
+                self.actions.append(action)
+                if action == "search[乳胶枕]":
+                    return {"instruction": search_results_observation(), "reward": 0.0, "done": False}
+                if action == "click[100000000001]":
+                    return {"instruction": 'detail\n\n可点击的按钮: ["红色", "Features", "Buy Now"]', "reward": 0.0, "done": False}
+                if action == "click[红色]":
+                    return {"instruction": 'selected\n\n可点击的按钮: ["Features", "Buy Now"]', "reward": 0.0, "done": False}
+                if action == "click[Features]":
+                    return {"instruction": 'features\n\n可点击的按钮: ["< Prev"]', "reward": 0.0, "done": False}
+                if action == "click[< Prev]":
+                    return {"instruction": 'detail\n\n可点击的按钮: ["Features", "Buy Now"]', "reward": 0.0, "done": False}
+                return {"instruction": "done", "reward": 1.0, "done": True, "over": True,
+                        "purchase": {"asin": "A1"}, "reward_detail": {}}
+
+        client = SnapshotClient([
+            assistant_tool("search_products", {"query": "乳胶枕"}, "search"),
+            assistant_tool("open_product", {"asin": "100000000001"}, "open"),
+            assistant_tool("select_option", {"value": "红色"}, "option"),
+            assistant_tool("view_features", {}, "features"),
+            assistant_tool("prev_page", {}, "prev"),
+            assistant_tool("buy_now", {}, "buy"),
+        ])
+        trajectory = collect_for_task(
+            {"task_id": 10}, client=client, env_factory=VerificationEnv,
+            harness_bank=AlwaysGuidance(), max_steps=7,
+        )
+
+        self.assertEqual(trajectory["status"], "done")
+        injected_requests = [
+            request for request in client.requests
+            if any(
+                "HARNESS_GUIDANCE" in str(message.get("content") or "")
+                for message in request["messages"]
+            )
+        ]
+        self.assertEqual(len(injected_requests), 1)
+
+    def test_available_tools_distinguish_products_options_and_navigation(self):
+        search_results = search_results_observation().replace(
+            '"back to search", "100000000001"',
+            '"back to search", "100000000001", "Next >"',
+        )
+        self.assertEqual(
+            available_tool_names(search_results),
+            {"open_product", "back_to_search", "next_page", "finish_without_purchase"},
+        )
+
+        information_page = (
+            "[SHOPPING_OBSERVATION_V2]\n"
+            "page_type: features\n"
+            "搜索功能是否可用: False\n"
+            '可点击的按钮: ["< Prev"]'
+        )
+        self.assertEqual(
+            available_tool_names(information_page),
+            {"prev_page", "finish_without_purchase"},
+        )
+
+        product_page = (
+            "[SHOPPING_OBSERVATION_V2]\n"
+            "page_type: product_detail\n"
+            "搜索功能是否可用: False\n"
+            '可点击的按钮: ["红色", "Features", "Buy Now"]'
+        )
+        self.assertEqual(
+            available_tool_names(product_page),
+            {"select_option", "view_features", "buy_now", "finish_without_purchase"},
+        )
+
     def test_collect_for_task_allows_current_page_navigation_after_option_selection(self):
         """选择规格后仍由环境当前页面决定能否浏览，采集器不另造状态机。"""
         class OptionEnv(FakeEnv):
@@ -455,6 +656,25 @@ class RolloutTest(unittest.TestCase):
             )
 
             self.assertEqual(completed_task_attempts(output), {(1, 0), (3, 0)})
+
+    def test_completed_task_attempts_retries_infrastructure_failures(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "raw.jsonl"
+            output.write_text(
+                json.dumps({
+                    "task_id": 1,
+                    "attempt_index": 0,
+                    "status": "error",
+                    "error": {"type": "ShopHttpError", "message": "HTTP 405"},
+                }) + "\n" + json.dumps({
+                    "task_id": 2,
+                    "attempt_index": 0,
+                    "status": "done",
+                }) + "\n",
+                encoding="utf-8",
+            )
+
+            self.assertEqual(completed_task_attempts(output), {(2, 0)})
 
     def test_collect_tasks_skips_existing_output_rows(self):
         with tempfile.TemporaryDirectory() as tmpdir:

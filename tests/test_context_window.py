@@ -76,6 +76,31 @@ class ChatContextWindowTest(unittest.TestCase):
                 max_input_tokens=3,
             )
 
+    def test_preserves_trailing_ephemeral_user_guidance(self):
+        messages = [
+            {"role": "system", "content": "rules"},
+            {"role": "user", "content": "task"},
+            assistant("old"),
+            tool("old", "old page"),
+            assistant("latest"),
+            tool("latest", "latest page"),
+            {"role": "user", "content": "[HARNESS_GUIDANCE] current advice"},
+        ]
+
+        compacted, stats = compact_chat_messages(
+            messages,
+            tools=[],
+            count_tokens=lambda candidate, tools: len(candidate),
+            max_input_tokens=5,
+        )
+
+        self.assertEqual(
+            [message["role"] for message in compacted],
+            ["system", "user", "assistant", "tool", "user"],
+        )
+        self.assertEqual(compacted[-1]["content"], "[HARNESS_GUIDANCE] current advice")
+        self.assertEqual(stats.removed_groups, 1)
+
     def test_rejects_broken_tool_call_pair(self):
         messages = [
             {"role": "user", "content": "task"},

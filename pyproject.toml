@@ -3,7 +3,7 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "shopping-grpo"
+name = "shopping-harness"
 version = "0.1.0"
 description = "ShopSimulator shopping-agent post-training and trajectory evaluation"
 readme = "README.md"
@@ -27,19 +27,6 @@ sft-accelerated = [
   "bitsandbytes>=0.45,<1",
   "liger-kernel>=0.6,<1",
 ]
-grpo = [
-  "verl==0.8.0",
-  "vllm==0.25.1",
-  "torch==2.11.0",
-  "torchvision==0.26.0",
-  "torchaudio==2.11.0",
-  "transformers @ git+https://github.com/huggingface/transformers.git@7ea2320c76117e6742364808a666ef6f2fb40a67",
-  "ray[default]==2.56.1",
-  "tensordict==0.10.0",
-  "numpy==2.2.6",
-  "swanlab==0.9.1",
-  "liger-kernel>=0.6,<1",
-]
 dev = [
   "build>=1.2,<2",
   "pytest>=8,<10",
@@ -48,7 +35,7 @@ dev = [
 ]
 
 [project.scripts]
-shopping-grpo = "shopping_grpo.cli:main"
+shopping-harness = "shopping_grpo.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
