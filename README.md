@@ -1,42 +1,78 @@
-# Shopping Harness：ShopSimulator 长程购物 Agent 的 SFT 与可审计 Harness
+# Shopping Harness
 
-这是一个面向新手的、可直接复现的 ShopSimulator 项目。本仓库只包含两部分：
+面向 ShopSimulator 长程购物 Agent 的 SFT 与 Harness 工程，围绕真实环境交互、可执行动作学习、轨迹证据抽取和运行时 guidance 构建可复现链路。本仓库只保留 SFT 与 Harness，不包含 GRPO 强化学习训练。
 
-- **LoRA SFT**：用经过 Reward v3 严格验收的购物轨迹训练模型；
-- **Harness**：从轨迹提炼可验证的 Memory/Skill，并在运行时注入有限 guidance，帮助 Agent 改善搜索、核验和终止决策。
+本版本将冻结的 ShopSimulator v2.1、Reward v3、SFT 数据工程和 Harness 离线/运行时闭环纳入同一仓库，支持从数据验收到 LoRA 训练、知识候选校验和评测的持续迭代。
 
-项目不包含 GRPO/强化学习训练。环境源码与商品索引构建脚本已随仓库提供，避免额外下载和版本漂移。
+## 核心能力与升级
 
-## 亮点与创新优化
+- **Action-only SFT**：只对 Assistant 工具动作计算 loss，屏蔽用户指令和环境 observation，让模型学习可执行购物策略。
+- **严格轨迹验收**：仅接受完整 `gold_purchase` 且 `reward_valid=true` 的终局；训练任务与评测任务按 `task_id` 隔离，避免数据泄漏。
+- **证据驱动 Harness**：Memory 只能来自单条规范化轨迹，Skill 至少引用两条不同轨迹；候选经过脱敏、schema 校验和 fail-closed 策略后才可进入 active bank。
+- **最小运行时注入**：每回合只选择有限 Memory 和一个 Skill，以临时 guidance 消息帮助 Agent 决策，不污染 canonical trajectory，也不修改工具协议和 Reward v3。
+- **长程购物环境**：覆盖搜索、详情核验、变体选择、约束满足、购买和合理终止，保留完整环境状态与可审计事件。
+- **可复现实验**：环境、商品数据、训练/验证 JSONL、评测任务和脚本统一管理；安装脚本不会自动启动训练或正式评测。
 
-1. **Action-only SFT**：只对 Assistant 的工具动作计算 loss，屏蔽用户指令和环境 observation，模型学到可执行策略而不是复述页面文本。
-2. **严格终局验收**：只有完整 `gold_purchase` 且 `reward_valid=true` 的轨迹进入训练，训练集与 `data/evaluation/tasks.jsonl` 做 task_id 隔离，避免数据泄漏。
-3. **证据驱动的 Harness**：Memory 只能来自单条规范化轨迹，Skill 至少交叉引用两条不同轨迹；fail-closed 校验、脱敏和原子写入保证知识库可审计。
-4. **运行时最小注入**：每回合最多选择一个 Skill 和有限条 Memory，guidance 作为临时消息注入，不污染原始轨迹、不修改安全规则、工具 schema 或 Reward v3。
-5. **冻结环境契约**：ShopSimulator v2.1、Observation v2、Tool schema v2 和 Reward v3 固定在同一版本，结果可复现。
+## 技术栈
 
-## 5 分钟安装
+```text
+环境：ShopSimulator v2.1 / Observation v2 / Tool schema v2 / Reward v3
+训练：Python / PyTorch / Transformers / PEFT / LoRA / Accelerate
+Harness：Memory / Skill schema / trajectory normalization / trigger matcher
+评测：ShopSimulator rollout / deterministic checks / rubric-based reports
+工程：uv / pytest / JSONL / SQLite product index
+```
 
-要求 Linux、Python 3.10+、`uv`；训练 LoRA 需要 NVIDIA GPU。先执行：
+## 购物流程
+
+```text
+用户需求 → 搜索候选 → 查看详情与属性 → 核验约束与证据
+                                      ↓
+                             选择正确商品变体
+                                      ↓
+                         购买成功或证据充分后终止
+                                      ↓
+                规范化轨迹 → Memory / Skill → 运行时 guidance
+```
+
+## 目录结构
+
+```text
+Harness/                         # Memory/Skill schema、离线管线与运行时注入
+environments/ShopSimulator/      # 冻结环境源码、商品数据与索引脚本
+data/sft/                        # SFT 训练与验证 JSONL
+data/evaluation/                 # 留出评测任务，不用于训练
+src/shopping_grpo/               # 环境、数据、SFT 与评测 Python 包
+scripts/                         # SFT、采集、评测和 Harness CLI
+docs/                            # SFT、评测和 Harness 设计文档
+tests/                           # 环境、SFT、Harness 和数据隔离测试
+```
+
+## 快速启动（Linux）
 
 ```bash
 git clone https://github.com/akka-sun/shopping-harness.git
 cd shopping-harness
 cp .env.example .env
+```
+
+安装 `uv` 后执行：
+
+```bash
 bash scripts/setup.sh
 ```
 
-`setup.sh` 会安装 SFT 依赖、创建隔离的 ShopSimulator 环境，并从仓库内置压缩包生成商品索引。无需安装 veRL、vLLM 或 Ray。
+脚本会安装 SFT 依赖、创建隔离的 ShopSimulator 环境，并从仓库内置压缩包构建商品索引。无需安装 veRL、vLLM 或 Ray。仅运行 Harness 离线校验时，可直接使用已有 Python 环境并设置 `PYTHONPATH=src`。
 
-## 运行 SFT
+## LoRA SFT
 
-仓库已提供训练/验证 JSONL：
+仓库已提供可直接使用的训练/验证数据：
 
 ```bash
 bash scripts/sft.sh
 ```
 
-指定自己的模型和输出目录：
+自定义模型和输出目录：
 
 ```bash
 python scripts/train_lora_sft.py \
@@ -47,15 +83,11 @@ python scripts/train_lora_sft.py \
   --epochs 3 --gradient-checkpointing
 ```
 
-显存不足时可减少 batch size 或训练样本数；完整参数见 [`docs/sft.md`](docs/sft.md)。训练前如需采集新轨迹：
+训练数据采集、过滤和显存参数见 [SFT 运行指南](docs/sft.md) 与 [数据采集说明](docs/data-collection.md)。
 
-```bash
-python scripts/collect_sft_data.py --help
-```
+## Harness 离线与运行时
 
-## 运行 Harness 离线流程
-
-先准备 `normalize_trajectory()` 生成的规范化轨迹 JSONL：
+根据规范化轨迹生成教师请求：
 
 ```bash
 PYTHONPATH=src python -m Harness memory-requests \
@@ -79,23 +111,15 @@ PYTHONPATH=src python -m Harness validate --kind memory \
   --rejected outputs/harness/run/memory/rejected.jsonl
 ```
 
-Harness 的组件说明和接入示例见 [`Harness/README.md`](Harness/README.md)。
+运行时接入方式、触发器和消息注入边界见 [Harness 说明](Harness/README.md)。
 
-## 目录结构
-
-- `scripts/train_lora_sft.py`、`scripts/sft.sh`：LoRA SFT；
-- `Harness/`：Memory/Skill schema、离线管线和运行时注入；
-- `environments/ShopSimulator/`：冻结的环境实现与商品数据；
-- `data/sft/`：训练/验证数据；`data/evaluation/`：仅用于最终评测；
-- `tests/`：环境、SFT、Harness 和数据隔离测试；
-- `docs/`：SFT、评测和 Harness 设计说明。
-
-运行基础检查：
+## 评测与工程验证
 
 ```bash
-PYTHONPATH=src pytest -q tests/test_harness.py tests/test_train_lora_sft_cli.py tests/test_sft_collection.py
+PYTHONPATH=src pytest -q
+PYTHONPATH=src python scripts/smoke_shop_env.py
 ```
 
-## 许可与复现边界
+正式评测使用 `data/evaluation/tasks.jsonl`，并保留固定分母、终局检查和轨迹审计。请按 [评测文档](docs/evaluation.md) 显式运行；安装脚本不会自动启动长时间训练或 200 任务评测。
 
-请遵守模型、ShopSimulator 数据和第三方依赖各自的许可证。正式 200 任务评测或长时间训练不会由安装脚本自动启动；请按需显式运行对应脚本。
+API 密钥、模型权重和本地实验产物不提交到仓库。ShopSimulator 商品数据与第三方模型请遵守各自许可证。
